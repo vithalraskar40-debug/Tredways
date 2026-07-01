@@ -27,6 +27,8 @@ export default function SMCChart({ pair, onSignal }) {
   const volRef = useRef(null);
   const ema20Ref = useRef(null);
   const ema50Ref = useRef(null);
+  const supportLineRef = useRef(null);
+  const resistanceLineRef = useRef(null);
   const priceLinesRef = useRef([]);
   const overlayRef = useRef(null);
   const candlesDataRef = useRef([]);
@@ -87,6 +89,18 @@ export default function SMCChart({ pair, onSignal }) {
     });
     ema50Ref.current = chart.addLineSeries({
       color: '#22d3ee', lineWidth: 1, priceLineVisible: false, lastValueVisible: false, title: 'EMA 50',
+    });
+
+    // Auto-drawn diagonal trendlines (support & resistance)
+    supportLineRef.current = chart.addLineSeries({
+      color: 'rgba(34,197,94,0.85)', lineWidth: 2, lineStyle: 2,
+      priceLineVisible: false, lastValueVisible: false, title: 'Support',
+      crosshairMarkerVisible: false,
+    });
+    resistanceLineRef.current = chart.addLineSeries({
+      color: 'rgba(244,63,94,0.85)', lineWidth: 2, lineStyle: 2,
+      priceLineVisible: false, lastValueVisible: false, title: 'Resistance',
+      crosshairMarkerVisible: false,
     });
 
     volRef.current = chart.addHistogramSeries({
@@ -243,6 +257,71 @@ export default function SMCChart({ pair, onSignal }) {
     series.setData(out);
   }
 
+  // ── Auto trendline draw  (support: swing lows | resistance: swing highs)
+  function detectSwings(candles, lookback = 3) {
+    const highs = [], lows = [];
+    for (let i = lookback; i < candles.length - lookback; i++) {
+      let isHigh = true, isLow = true;
+      for (let j = -lookback; j <= lookback; j++) {
+        if (j === 0) continue;
+        if (candles[i + j].high >= candles[i].high) isHigh = false;
+        if (candles[i + j].low  <= candles[i].low)  isLow  = false;
+      }
+      if (isHigh) highs.push({ i, price: candles[i].high, time: candles[i].time });
+      if (isLow)  lows.push({ i, price: candles[i].low,  time: candles[i].time });
+    }
+    return { highs, lows };
+  }
+
+  function bestTrendline(pivots) {
+    if (!pivots || pivots.length < 3) return null;
+    const recent = pivots.slice(-10);
+    let best = null;
+    for (let a = 0; a < recent.length - 1; a++) {
+      for (let b = a + 1; b < recent.length; b++) {
+        const A = recent[a], B = recent[b];
+        const dx = B.i - A.i;
+        if (dx < 5) continue;
+        const slope = (B.price - A.price) / dx;
+        let touches = 0;
+        const tol = A.price * 0.003;   // 0.3 % tolerance
+        for (const p of recent) {
+          const expected = A.price + slope * (p.i - A.i);
+          if (Math.abs(p.price - expected) <= tol) touches++;
+        }
+        if (touches >= 2 && (!best || touches > best.touches)) best = { A, B, slope, touches };
+      }
+    }
+    return best;
+  }
+
+  function drawTrendlines(candles) {
+    const supS = supportLineRef.current;
+    const resS = resistanceLineRef.current;
+    if (!supS || !resS) return;
+    supS.setData([]);
+    resS.setData([]);
+    if (candles.length < 20) return;
+    const { highs, lows } = detectSwings(candles, 3);
+
+    const supp = bestTrendline(lows);
+    if (supp) {
+      const y2 = supp.A.price + supp.slope * (candles.length - 1 - supp.A.i);
+      supS.setData([
+        { time: supp.A.time, value: supp.A.price },
+        { time: candles.at(-1).time, value: y2 },
+      ]);
+    }
+    const res = bestTrendline(highs);
+    if (res) {
+      const y2 = res.A.price + res.slope * (candles.length - 1 - res.A.i);
+      resS.setData([
+        { time: res.A.time, value: res.A.price },
+        { time: candles.at(-1).time, value: y2 },
+      ]);
+    }
+  }
+
   function drawSMC(smc, candles) {
     const s = candleRef.current;
     if (!s || !candles.length) return;
@@ -289,7 +368,21 @@ export default function SMCChart({ pair, onSignal }) {
         });
       }
     });
+    // BOS marker on the last candle when we have a valid setup
+    if (lg && lg.direction !== 'NONE') {
+      markers.push({
+        time: candles.at(-1).time,
+        position: lg.direction === 'LONG' ? 'belowBar' : 'aboveBar',
+        color: lg.direction === 'LONG' ? '#22c55e' : '#f43f5e',
+        shape: lg.direction === 'LONG' ? 'arrowUp' : 'arrowDown',
+        size: 2,
+        text: `${lg.direction} ${lg.grade}`,
+      });
+    }
     if (markers.length) s.setMarkers(markers);
+
+    // Auto-drawn diagonal trendlines (support & resistance) from swing highs/lows
+    drawTrendlines(candles);
 
     // Trigger overlay redraw for zone-boxes
     setTimeout(redrawOverlay, 60);
@@ -439,6 +532,8 @@ export default function SMCChart({ pair, onSignal }) {
         <span className="phase-pill dis"><span className="sw" style={{ background: '#f43f5e' }} /> Distribution</span>
         <span className="phase-pill ob"><span className="sw" style={{ background: '#ffb020' }} /> EMA 20</span>
         <span className="phase-pill fvg"><span className="sw" style={{ background: '#22d3ee' }} /> EMA 50</span>
+        <span className="phase-pill acc"><span className="sw" style={{ background: 'rgba(34,197,94,0.85)', height: 2 }} /> Support TL</span>
+        <span className="phase-pill dis"><span className="sw" style={{ background: 'rgba(244,63,94,0.85)', height: 2 }} /> Resistance TL</span>
       </div>
     </div>
   );
