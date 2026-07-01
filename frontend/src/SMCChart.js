@@ -166,6 +166,10 @@ export default function SMCChart({ pair, onSignal }) {
         drawEMA(candles, 20, ema20Ref.current);
         drawEMA(candles, 50, ema50Ref.current);
 
+        // ALWAYS draw diagonal support / resistance trendlines from swings
+        // (independent of SMC endpoint success)
+        drawTrendlines(candles);
+
         setLastPrice(chartRes.live_price ?? candles.at(-1)?.close ?? null);
 
         // Clear previous overlays
@@ -274,22 +278,37 @@ export default function SMCChart({ pair, onSignal }) {
   }
 
   function bestTrendline(pivots) {
-    if (!pivots || pivots.length < 3) return null;
+    if (!pivots || pivots.length < 2) return null;
+    // Fallback: exactly 2 pivots → straight line through them
+    if (pivots.length === 2) {
+      const [A, B] = pivots;
+      const dx = Math.max(1, B.i - A.i);
+      return { A, B, slope: (B.price - A.price) / dx, touches: 2 };
+    }
     const recent = pivots.slice(-10);
     let best = null;
     for (let a = 0; a < recent.length - 1; a++) {
       for (let b = a + 1; b < recent.length; b++) {
         const A = recent[a], B = recent[b];
         const dx = B.i - A.i;
-        if (dx < 5) continue;
+        if (dx < 3) continue;
         const slope = (B.price - A.price) / dx;
         let touches = 0;
-        const tol = A.price * 0.003;   // 0.3 % tolerance
+        const tol = Math.max(A.price * 0.006, 1);   // 0.6 % tolerance (loosened)
         for (const p of recent) {
           const expected = A.price + slope * (p.i - A.i);
           if (Math.abs(p.price - expected) <= tol) touches++;
         }
-        if (touches >= 2 && (!best || touches > best.touches)) best = { A, B, slope, touches };
+        if (!best || touches > best.touches) best = { A, B, slope, touches };
+      }
+    }
+    // Final fallback → use last two pivots
+    if (!best) {
+      const A = recent[recent.length - 2];
+      const B = recent[recent.length - 1];
+      if (A && B) {
+        const dx = Math.max(1, B.i - A.i);
+        best = { A, B, slope: (B.price - A.price) / dx, touches: 2 };
       }
     }
     return best;
@@ -301,23 +320,33 @@ export default function SMCChart({ pair, onSignal }) {
     if (!supS || !resS) return;
     supS.setData([]);
     resS.setData([]);
-    if (candles.length < 20) return;
-    const { highs, lows } = detectSwings(candles, 3);
+    if (candles.length < 15) return;
+    // Try progressively tighter lookback to guarantee we find pivots
+    let highs = [], lows = [];
+    for (const lb of [3, 2, 1]) {
+      const s = detectSwings(candles, lb);
+      highs = s.highs; lows = s.lows;
+      if (highs.length >= 2 && lows.length >= 2) break;
+    }
+
+    const lastIdx = candles.length - 1;
+    const perBar = candles.length >= 2 ? (candles.at(-1).time - candles.at(-2).time) : 900;
+    const rightExtendBars = 6; // extend line 6 bars past last candle for visibility
 
     const supp = bestTrendline(lows);
     if (supp) {
-      const y2 = supp.A.price + supp.slope * (candles.length - 1 - supp.A.i);
+      const y2 = supp.A.price + supp.slope * (lastIdx + rightExtendBars - supp.A.i);
       supS.setData([
         { time: supp.A.time, value: supp.A.price },
-        { time: candles.at(-1).time, value: y2 },
+        { time: candles[lastIdx].time + perBar * rightExtendBars, value: y2 },
       ]);
     }
     const res = bestTrendline(highs);
     if (res) {
-      const y2 = res.A.price + res.slope * (candles.length - 1 - res.A.i);
+      const y2 = res.A.price + res.slope * (lastIdx + rightExtendBars - res.A.i);
       resS.setData([
         { time: res.A.time, value: res.A.price },
-        { time: candles.at(-1).time, value: y2 },
+        { time: candles[lastIdx].time + perBar * rightExtendBars, value: y2 },
       ]);
     }
   }
