@@ -27,3 +27,7 @@ export const analyzeForex = (pair, mode = 'STRICT', dataSource = 'REALTIME') => 
 
 export const getScanner = () => api.get('/scanner').then(r => r.data);
 export const getHealth  = () => api.get('/health').then(r => r.data);
+
+// ── Opportunity Ticker ─────────────────────────────────────
+export const getOpportunities = (minGrade = 'B') =>
+  api.get(`/opportunities?min_grade=${encodeURIComponent(minGrade)}`).then(r => r.data);

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import SMCChart from './SMCChart';
+import OpportunityTicker from './OpportunityTicker';
 import { analyzeStock, analyzeForex, getHealth, getScanner } from './api';
 import {
   saveTrade, getAllTrades, updateTradeOutcome, clearAllTrades,
@@ -79,6 +80,17 @@ export default function App() {
           <span className="live-dot" /> Engine {nodeStatus.toUpperCase()}
         </div>
       </div>
+
+      <OpportunityTicker onPick={(o) => {
+        const isFx = /USD|EUR|GBP|JPY|AUD|GOLD|XAU|BTC|ETH|SOL|XRP/.test(o.symbol);
+        if (isFx) {
+          setPair(o.symbol);
+          setTab('FOREX');
+        } else {
+          setTicker(o.symbol);
+          setTab('STOCKS');
+        }
+      }} />
 
       <div className="tabs" role="tablist">
         {TABS.map(t => (

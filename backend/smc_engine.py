@@ -251,13 +251,13 @@ def liquidity_grab_and_retest(df: pd.DataFrame, atr: float) -> LiquidityGrabSign
     BEARISH setup:
       1. Prior BOS to the downside (break of a swing low)  OR  clear downtrend structure
       2. Price returns UP and grabs liquidity above a prior swing high
-      3. Then closes back below that high (LL Failed / trap)
+      3. Then closes back below that high (LL Failed / trap) OR strong impulse candle
       4. Retest of the trap zone → SHORT
 
     BULLISH setup (mirror):
       1. Prior BOS to the upside  OR  clear uptrend structure
       2. Price returns DOWN and grabs liquidity below a prior swing low
-      3. Then closes back above that low
+      3. Then closes back above that low OR strong impulse candle
       4. Retest → LONG
     """
     sig = LiquidityGrabSignal(direction="NONE")
@@ -274,9 +274,13 @@ def liquidity_grab_and_retest(df: pd.DataFrame, atr: float) -> LiquidityGrabSign
         return sig
 
     last_close = float(df["close"].iloc[-1])
+    last_open = float(df["open"].iloc[-1])
     last_high = float(df["high"].iloc[-1])
     last_low = float(df["low"].iloc[-1])
     last_idx = len(df) - 1
+    last_body = abs(last_close - last_open)
+    strong_bull_impulse = (last_close > last_open) and (last_body >= atr * 1.2)
+    strong_bear_impulse = (last_close < last_open) and (last_body >= atr * 1.2)
 
     # Look at the most recent swings within the last 100 bars only
     recent_lookback = min(100, len(df))
@@ -287,21 +291,32 @@ def liquidity_grab_and_retest(df: pd.DataFrame, atr: float) -> LiquidityGrabSign
         highs_r, lows_r = highs, lows
 
     # ─── BEARISH SETUP ────────────────────────────────────────────────
+    bearish_candidate = None
     if len(highs_r) >= 2 and len(lows_r) >= 2:
         prev_swing_low = lows_r[-1]
         prev_swing_high = highs_r[-1]
         older_low = lows_r[-2] if len(lows_r) >= 2 else lows_r[0]
-        # BOS: broken below any earlier low
-        bos_down = df.iloc[max(0, prev_swing_low["idx"] - 20):]["low"].min() < older_low["price"]
-        # Structure: recent HHs are lower than earlier HHs (downtrend)
-        struct_down = len(highs_r) >= 2 and highs_r[-1]["price"] < highs_r[0]["price"]
-        recent = df.iloc[max(0, last_idx - 20): last_idx + 1]
-        grabbed_high = recent["high"].max() > prev_swing_high["price"] + atr * 0.1
-        closed_back = last_close < prev_swing_high["price"]
-        retest = abs(last_high - prev_swing_high["price"]) < atr * 0.8 and last_close < prev_swing_high["price"]
-        distance_ok = (prev_swing_high["price"] - last_close) < atr * 5
+        older_high = highs_r[-2] if len(highs_r) >= 2 else highs_r[0]
 
-        if (bos_down or struct_down) and grabbed_high and closed_back and distance_ok:
+        # Short-term BOS_DOWN: after the recent higher-low (prev_swing_low), price broke below it
+        after_low = df.iloc[prev_swing_low["idx"] + 1:]
+        bos_down = len(after_low) > 0 and float(after_low["low"].min()) < prev_swing_low["price"]
+        # Structure: any downtrend evidence (lower highs)
+        struct_down = len(highs_r) >= 2 and highs_r[-1]["price"] < older_high["price"]
+
+        recent = df.iloc[max(0, last_idx - 20): last_idx + 1]
+        grabbed_high = float(recent["high"].max()) > prev_swing_high["price"] + atr * 0.1
+        closed_back = last_close < prev_swing_high["price"]
+        # Retest = last candle's high near the grabbed level and current close below it
+        retest = abs(last_high - prev_swing_high["price"]) < atr * 0.8 and last_close < prev_swing_high["price"]
+        distance = prev_swing_high["price"] - last_close
+        extended = distance > atr * 8   # grade B if far, still emit
+        distance_ok = distance < atr * 25   # only reject truly stale setups
+
+        # Trigger: (a) closed back OR (b) strong bear impulse candle that swept & closed lower
+        triggered = closed_back or strong_bear_impulse
+
+        if (bos_down or struct_down) and grabbed_high and triggered and distance_ok:
             entry = float(prev_swing_high["price"] - atr * 0.1)
             sl = float(recent["high"].max() + atr * 0.3)
             risk = abs(sl - entry)
@@ -310,37 +325,57 @@ def liquidity_grab_and_retest(df: pd.DataFrame, atr: float) -> LiquidityGrabSign
                 tp2 = entry - risk * 2.5
                 tp3 = entry - risk * 4.0
                 reasons = []
-                if bos_down: reasons.append("BOS to downside confirmed")
+                if bos_down: reasons.append("Short-term BOS down (broke recent higher low)")
                 elif struct_down: reasons.append("Downtrend structure (lower highs)")
                 reasons.append("Liquidity grabbed above prior swing high")
-                reasons.append("Closed back below the grabbed level (LL Failed / trap)")
+                if closed_back: reasons.append("Closed back below the grabbed level (trap)")
+                if strong_bear_impulse: reasons.append(f"Strong bearish impulse candle (body {last_body:.2f})")
                 if retest: reasons.append("Retest of broken high confirmed")
-                grade = "A+" if (retest and bos_down) else "A" if bos_down else "B"
-                return LiquidityGrabSignal(
+                if extended: reasons.append(f"Extended entry ({distance/atr:.1f}× ATR away)")
+                # Grade
+                if extended:
+                    grade = "B"
+                elif retest and bos_down:
+                    grade = "A+"
+                elif bos_down or strong_bear_impulse:
+                    grade = "A"
+                else:
+                    grade = "B"
+                bearish_candidate = LiquidityGrabSignal(
                     direction="SHORT",
                     entry=round(entry, 4), sl=round(sl, 4),
                     tp1=round(tp1, 4), tp2=round(tp2, 4), tp3=round(tp3, 4),
                     rr=round(abs(tp2 - entry) / risk, 2),
                     grade=grade, reasons=reasons,
-                    bos_price=float(older_low["price"]),
+                    bos_price=float(prev_swing_low["price"]),
                     grab_price=float(prev_swing_high["price"]),
                     retest_confirmed=retest,
                 )
 
     # ─── BULLISH SETUP ────────────────────────────────────────────────
+    bullish_candidate = None
     if len(highs_r) >= 2 and len(lows_r) >= 2:
         prev_swing_high2 = highs_r[-1]
         prev_swing_low2 = lows_r[-1]
         older_high = highs_r[-2] if len(highs_r) >= 2 else highs_r[0]
-        bos_up = df.iloc[max(0, prev_swing_high2["idx"] - 20):]["high"].max() > older_high["price"]
-        struct_up = len(lows_r) >= 2 and lows_r[-1]["price"] > lows_r[0]["price"]
+        older_low = lows_r[-2] if len(lows_r) >= 2 else lows_r[0]
+
+        # Short-term BOS_UP: after the recent lower-high (prev_swing_high2), price broke above it
+        after_high = df.iloc[prev_swing_high2["idx"] + 1:]
+        bos_up = len(after_high) > 0 and float(after_high["high"].max()) > prev_swing_high2["price"]
+        struct_up = len(lows_r) >= 2 and lows_r[-1]["price"] > older_low["price"]
+
         recent = df.iloc[max(0, last_idx - 20): last_idx + 1]
-        grabbed_low = recent["low"].min() < prev_swing_low2["price"] - atr * 0.1
+        grabbed_low = float(recent["low"].min()) < prev_swing_low2["price"] - atr * 0.1
         closed_back = last_close > prev_swing_low2["price"]
         retest = abs(last_low - prev_swing_low2["price"]) < atr * 0.8 and last_close > prev_swing_low2["price"]
-        distance_ok = (last_close - prev_swing_low2["price"]) < atr * 5
+        distance = last_close - prev_swing_low2["price"]
+        extended = distance > atr * 8
+        distance_ok = distance < atr * 25
 
-        if (bos_up or struct_up) and grabbed_low and closed_back and distance_ok:
+        triggered = closed_back or strong_bull_impulse
+
+        if (bos_up or struct_up) and grabbed_low and triggered and distance_ok:
             entry = float(prev_swing_low2["price"] + atr * 0.1)
             sl = float(recent["low"].min() - atr * 0.3)
             risk = abs(entry - sl)
@@ -349,24 +384,44 @@ def liquidity_grab_and_retest(df: pd.DataFrame, atr: float) -> LiquidityGrabSign
                 tp2 = entry + risk * 2.5
                 tp3 = entry + risk * 4.0
                 reasons = []
-                if bos_up: reasons.append("BOS to upside confirmed")
+                if bos_up: reasons.append("Short-term BOS up (broke recent lower high)")
                 elif struct_up: reasons.append("Uptrend structure (higher lows)")
                 reasons.append("Liquidity grabbed below prior swing low")
-                reasons.append("Closed back above the grabbed level (HL Failed / trap)")
+                if closed_back: reasons.append("Closed back above the grabbed level (trap)")
+                if strong_bull_impulse: reasons.append(f"Strong bullish impulse candle (body {last_body:.2f})")
                 if retest: reasons.append("Retest of broken low confirmed")
-                grade = "A+" if (retest and bos_up) else "A" if bos_up else "B"
-                return LiquidityGrabSignal(
+                if extended: reasons.append(f"Extended entry ({distance/atr:.1f}× ATR away)")
+                if extended:
+                    grade = "B"
+                elif retest and bos_up:
+                    grade = "A+"
+                elif bos_up or strong_bull_impulse:
+                    grade = "A"
+                else:
+                    grade = "B"
+                bullish_candidate = LiquidityGrabSignal(
                     direction="LONG",
                     entry=round(entry, 4), sl=round(sl, 4),
                     tp1=round(tp1, 4), tp2=round(tp2, 4), tp3=round(tp3, 4),
                     rr=round(abs(tp2 - entry) / risk, 2),
                     grade=grade, reasons=reasons,
-                    bos_price=float(older_high["price"]),
+                    bos_price=float(prev_swing_high2["price"]),
                     grab_price=float(prev_swing_low2["price"]),
                     retest_confirmed=retest,
                 )
 
-    return sig
+    # Pick the freshest / higher-grade candidate. Prefer the direction whose grab
+    # happened most recently (impulse candle is decisive).
+    def _grade_rank(g: str) -> int:
+        return {"A+": 3, "A": 2, "B": 1}.get(g, 0)
+
+    if bullish_candidate and bearish_candidate:
+        if strong_bull_impulse and not strong_bear_impulse:
+            return bullish_candidate
+        if strong_bear_impulse and not strong_bull_impulse:
+            return bearish_candidate
+        return bullish_candidate if _grade_rank(bullish_candidate.grade) >= _grade_rank(bearish_candidate.grade) else bearish_candidate
+    return bullish_candidate or bearish_candidate or sig
 
 
 # ────────────────────────────────────────────────────────────────────────────
