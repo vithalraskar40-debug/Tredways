@@ -1,0 +1,35 @@
+{
+  "summary": "First-round backend-only testing for Tredways. Created pytest suite at /app/backend/tests/backend_test.py covering 21 test cases across health, chart-data, SMC analyze (RELIANCE/EURUSD/BTCUSD/XAUUSD/NIFTY), stock/forex/scalp analyze proxies, angel-price fallback, scanner, and symbol normalization. All 21 tests passed (100%). Data-quality spot checks confirm valid JSON payloads with expected fields (current_phase, zones[], liquidity_grab{direction,grade,reasons}, atr, last_price, candles OHLC+timestamp, live_price, signal_type/status_label/entry/sl/tp). Node backend health reports ok; python->node proxy path is working through Kubernetes ingress. Angel is correctly stubbed and falls back to Yahoo as expected.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/smc-analyze", "issue": "current_phase came back NEUTRAL for all 5 tested pairs during off-hours; phase detection heuristic may be too strict (accumulation range < 2*ATR + explicit manipulation false-breakout). Zones/FVGs/OBs are populated correctly, so this is acceptable but worth verifying during market hours."},
+      {"endpoint": "/api/analyze (node)", "issue": "reason_summary reports 'WEAK VOLUME: 0.0x avg' — volume feed from Yahoo can be 0 on FX/crypto/off-hours which permanently trips the trap-detection filter and forces WAIT. Consider skipping the volume-trap check for FX/crypto or when volume==0."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "None blocking. Optional: relax SMC phase heuristic or expose thresholds via env so phases populate more often.",
+    "Optional: bypass volume-trap check in node analyze when instrument has no reliable volume (FX/crypto/off-hours).",
+    "Optional: expose /api/stats through node backend — not tested here since not listed in review request."
+  ],
+  "critical_code_review_comments": [
+    "server.py: LiquidityGrabSignal.rr calculation uses `risk and (abs(tp2-entry)/risk)` — if risk==0 rr becomes 0 (falsy short-circuit) which is fine, but round(0,2) is valid; still, a division safety comment would help future maintainers.",
+    "server.py: /api/chart-data returns HTTPException with status 404 on missing data — good; but /api/smc-analyze uses same 404 for 'insufficient data' which could be confused with symbol-not-found. Consider 422.",
+    "smc_engine.py detect_phases loops from n-200 → n-window and keeps overwriting best_acc, effectively returning the LAST qualifying window. Naming best_acc is misleading — it isn't optimized, just the most recent. Rename to last_acc for clarity.",
+    "smc_engine.py: swing detection uses lookback=3 which is fine for 15m but may be noisy on 1m and too coarse on 1d. Consider adaptive lookback per timeframe.",
+    "server.py: CORS uses os.environ.get('CORS_ORIGINS','*').split(',') with allow_credentials=True — combining '*' with credentials is invalid per CORS spec and browsers will reject. Set explicit origins in prod."
+  ],
+  "updated_files": ["/app/backend/tests/backend_test.py"],
+  "success_rate": {"backend": "100% (21/21)", "frontend": "not tested (backend-only run)"},
+  "test_credentials": "none required",
+  "seed_data_creation": "none",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Backend suite at /app/backend/tests/backend_test.py. Uses REACT_APP_BACKEND_URL from env (public ingress). Run: `REACT_APP_BACKEND_URL=<url> pytest /app/backend/tests/backend_test.py -v --junitxml=/app/test_reports/pytest/pytest_results.xml`. All endpoints verified working: /api/health, /api/chart-data, /api/smc-analyze, /api/analyze, /api/analyze-forex, /api/analyze-forex-scalp, /api/angel-price, /api/scanner. Angel is stubbed → Yahoo. Frontend NOT tested this round (backend-only per review request).",
+  "rca of the issue": "No bugs to RCA — all critical endpoints healthy and returning schema-compliant JSON."
+}
