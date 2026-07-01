@@ -36,8 +36,8 @@ All external calls flow through `/api/*` on port 8001 (Kubernetes ingress requir
 - **Candle size fix** — barSpacing 6 (thin candles), minBarSpacing 2, showing 300 candles per view.
 - **Signal stability fix** — new hysteresis logic in App.js (`stabilityRef`): a new LONG/SHORT direction must repeat for 2 consecutive polls before replacing the last emitted signal. Prevents the flicker between buy/sell.
 - **TradeConfirm receives ChartWithZones signal** — `SMCChart` component calls `onSignal(...)` when a Liquidity Grab & Retest setup is confirmed by the SMC engine; that signal flows into `chartSignal` state in `App.js` and is passed to `ConfirmScreen`. Previously the mobile app never wired this bridge.
-- **AutoBot removed** — Accuracy Tracker no longer takes trades automatically. Trades are only logged when the user clicks "EXECUTE" on the CONFIRM TRADE screen. This addresses the primary requirement.
-- **Profit tracking** — Accuracy Tracker now shows Profit (R multiples) in addition to win rate.
+- **AutoBot restored (2026-01-01, revised)** — Per user's clarification, the Accuracy Tracker **auto-logs every BUY / SELL signal** as soon as the analyze engine (Stocks + Forex) or the SMC chart engine confirms one. Deduped by pair + direction + entry-within-0.3%. This lets the user measure the app's overall accuracy and profit (R multiples) hands-off.
+- **Profit tracking** — Accuracy Tracker shows Profit (R multiples) in addition to win rate.
 
 ### Design
 - Dark trading terminal aesthetic. Sora + JetBrains Mono fonts. Deep-space navy + electric amber accent (no purple gradients / AI-slop patterns). All buttons/inputs have distinct hover/focus states.

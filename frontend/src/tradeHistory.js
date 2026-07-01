@@ -37,6 +37,17 @@ export function saveTrade(signal, extras = {}) {
 export function getAllTrades() { return load(); }
 export function getOpenTrades() { return load().filter(t => t.outcome === 'OPEN'); }
 
+/** Dedup guard: is there already an OPEN trade for this pair+direction with entry within 0.3%? */
+export function hasSimilarOpenTrade({ pair, signal_type, entry }) {
+  const p = (pair || '').toUpperCase().replace(/[-/_]/g, '');
+  return getOpenTrades().some(t => {
+    if ((t.pair || '').replace(/[-/_]/g, '') !== p) return false;
+    if (t.signal_type !== signal_type) return false;
+    if (!t.entry || !entry) return false;
+    return Math.abs(t.entry - entry) / entry < 0.003;   // within 0.3%
+  });
+}
+
 export function updateTradeOutcome(id, outcome, closePrice = null) {
   const trades = load();
   const i = trades.findIndex(t => t.id === id);

@@ -3,7 +3,7 @@ import SMCChart from './SMCChart';
 import { analyzeStock, analyzeForex, getHealth, getScanner } from './api';
 import {
   saveTrade, getAllTrades, updateTradeOutcome, clearAllTrades,
-  computeStats, checkOpenTradesLive,
+  computeStats, checkOpenTradesLive, hasSimilarOpenTrade,
 } from './tradeHistory';
 
 const TABS = [
@@ -39,9 +39,32 @@ export default function App() {
     else { st.lastType = type; st.count = 1; }
     if (type === 'NEUTRAL' || st.count >= 2) {
       setSignal(s);
+      // 🤖 AUTO-LOG: if the stable signal is a TRADE, log it to the Accuracy Tracker
+      // (deduped by pair+direction+entry so we don't log the same setup repeatedly).
+      const isTrade = s.state === 'TRADE' || s.status_label === 'TRADE';
+      if (isTrade && s.entry != null && s.sl != null && (s.tp1 != null || s.tp != null)) {
+        if (!hasSimilarOpenTrade({ pair: s.pair || s.ticker, signal_type: type, entry: s.entry })) {
+          saveTrade(s, { source: 'AUTO' });
+        }
+      }
     } else {
       // Keep old signal but update price/status labels
       setSignal(prev => prev ? { ...prev, current_price: s.current_price, reason_summary: prev.reason_summary } : s);
+    }
+  }, []);
+
+  // 🤖 Auto-log signals emitted by the ChartWithZones SMC engine.
+  const acceptChartSignal = useCallback((s) => {
+    setChartSignal(s);
+    if (!s) return;
+    if (s.entry != null && s.sl != null && (s.tp1 != null)) {
+      if (!hasSimilarOpenTrade({ pair: s.pair, signal_type: s.signal_type, entry: s.entry })) {
+        saveTrade({
+          ...s,
+          strategy: 'SMC',
+          mode: 'SMC',
+        }, { source: 'CHART_AUTO' });
+      }
     }
   }, []);
 
@@ -69,8 +92,8 @@ export default function App() {
       </div>
 
       <div className="content">
-        {tab === 'STOCKS'   && <StocksScreen pair={ticker} setPair={setTicker} signal={signal} setSignal={acceptSignal} setChartSignal={setChartSignal} goToConfirm={() => setTab('CONFIRM')} />}
-        {tab === 'FOREX'    && <ForexScreen  pair={pair} setPair={setPair} signal={signal} setSignal={acceptSignal} setChartSignal={setChartSignal} goToConfirm={() => setTab('CONFIRM')} />}
+        {tab === 'STOCKS'   && <StocksScreen pair={ticker} setPair={setTicker} signal={signal} setSignal={acceptSignal} setChartSignal={acceptChartSignal} goToConfirm={() => setTab('CONFIRM')} />}
+        {tab === 'FOREX'    && <ForexScreen  pair={pair} setPair={setPair} signal={signal} setSignal={acceptSignal} setChartSignal={acceptChartSignal} goToConfirm={() => setTab('CONFIRM')} />}
         {tab === 'CONFIRM'  && <ConfirmScreen signal={chartSignal || signal} />}
         {tab === 'ACCURACY' && <AccuracyScreen />}
         {tab === 'SCANNER'  && <ScannerScreen />}
@@ -436,12 +459,13 @@ function AccuracyScreen() {
   return (
     <div>
       <div className="card">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
           <div>
             <div className="card-title" style={{ marginBottom: 4 }}>Accuracy Tracker</div>
             <div className="small">
-              Read-only performance tracker. Trades are logged <b>only</b> when you confirm them manually
-              from the CONFIRM TRADE tab. No auto-execution.
+              🤖 <b style={{ color: 'var(--accent)' }}>Auto-logging is ACTIVE.</b> Every BUY / SELL signal from the analyze
+              engine (Stocks + Forex) and the SMC chart engine is logged here automatically so you can
+              measure the app&apos;s accuracy and profit (in R multiples). Duplicate setups are deduped.
             </div>
           </div>
           <button className="btn ghost" onClick={clearAll} data-testid="clear-history-btn">🗑 Clear</button>
@@ -451,8 +475,8 @@ function AccuracyScreen() {
       {trades.length === 0 ? (
         <div className="empty" data-testid="accuracy-empty">
           <div className="ico">📭</div>
-          <div className="t">No Trades Logged Yet</div>
-          <div className="s">Confirm a trade from CONFIRM TRADE tab. Each execution is logged here for accuracy tracking.</div>
+          <div className="t">Waiting for the first signal…</div>
+          <div className="s">The tracker auto-logs each BUY / SELL signal as soon as the analyze engine or the SMC chart confirms one. Open STOCKS or FOREX and start an analysis.</div>
         </div>
       ) : (
         <>
