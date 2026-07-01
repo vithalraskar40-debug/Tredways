@@ -307,50 +307,50 @@ async def opportunities(
       • timeframes=15m,1h          (comma separated, optional)
       • min_grade=A                (A+, A, or B — default B = all)
     """
+    import asyncio
     watch = [s.strip().upper() for s in (symbols or ",".join(DEFAULT_WATCHLIST)).split(",") if s.strip()]
     tfs = [t.strip() for t in (timeframes or ",".join(OPPORTUNITY_TIMEFRAMES)).split(",") if t.strip()]
     grade_rank = {"A+": 3, "A": 2, "B": 1}
     min_rank = grade_rank.get(min_grade.upper(), 1)
 
-    results: list[dict] = []
-    for sym in watch:
-        for tf in tfs:
-            interval, period = TF_MAP.get(tf, ("15m", "60d"))
-            try:
-                candles = fetch_yf_candles(sym, interval, period)
-                if len(candles) < 60:
-                    continue
-                df = candles_to_df(candles)
-                analysis = analyze_smc(df)
-                lg = analysis.get("liquidity_grab") or {}
-                direction = lg.get("direction", "NONE")
-                grade = lg.get("grade", "AVOID")
-                if direction == "NONE" or grade_rank.get(grade, 0) < min_rank:
-                    continue
-                last_price = float(df["close"].iloc[-1])
-                results.append({
-                    "symbol": sym,
-                    "timeframe": tf,
-                    "direction": direction,
-                    "grade": grade,
-                    "entry": lg.get("entry"),
-                    "sl": lg.get("sl"),
-                    "tp1": lg.get("tp1"),
-                    "tp2": lg.get("tp2"),
-                    "tp3": lg.get("tp3"),
-                    "rr": lg.get("rr"),
-                    "retest": lg.get("retest_confirmed", False),
-                    "reasons": lg.get("reasons", []),
-                    "current_price": last_price,
-                    "phase": analysis.get("current_phase"),
-                    "atr": analysis.get("atr"),
-                    "grab_price": lg.get("grab_price"),
-                    "bos_price": lg.get("bos_price"),
-                })
-            except Exception as exc:
-                log.warning("opportunity scan failed for %s %s: %s", sym, tf, exc)
-                continue
-    # Sort: A+ first, then A, then B; within grade — highest R:R first
+    async def _scan_one(sym: str, tf: str) -> Optional[dict]:
+        interval, period = TF_MAP.get(tf, ("15m", "60d"))
+        try:
+            candles = await asyncio.to_thread(fetch_yf_candles, sym, interval, period)
+            if len(candles) < 60:
+                return None
+            df = candles_to_df(candles)
+            analysis = await asyncio.to_thread(analyze_smc, df)
+            lg = analysis.get("liquidity_grab") or {}
+            direction = lg.get("direction", "NONE")
+            grade = lg.get("grade", "AVOID")
+            if direction == "NONE" or grade_rank.get(grade, 0) < min_rank:
+                return None
+            return {
+                "symbol": sym,
+                "timeframe": tf,
+                "direction": direction,
+                "grade": grade,
+                "entry": lg.get("entry"),
+                "sl": lg.get("sl"),
+                "tp1": lg.get("tp1"),
+                "tp2": lg.get("tp2"),
+                "tp3": lg.get("tp3"),
+                "rr": lg.get("rr"),
+                "retest": lg.get("retest_confirmed", False),
+                "reasons": lg.get("reasons", []),
+                "current_price": float(df["close"].iloc[-1]),
+                "phase": analysis.get("current_phase"),
+                "atr": analysis.get("atr"),
+                "grab_price": lg.get("grab_price"),
+                "bos_price": lg.get("bos_price"),
+            }
+        except Exception as exc:
+            log.warning("opportunity scan failed for %s %s: %s", sym, tf, exc)
+            return None
+
+    tasks = [_scan_one(sym, tf) for sym in watch for tf in tfs]
+    results = [r for r in await asyncio.gather(*tasks) if r]
     results.sort(key=lambda r: (grade_rank.get(r["grade"], 0), r.get("rr") or 0), reverse=True)
     return {"count": len(results), "opportunities": results}
 
