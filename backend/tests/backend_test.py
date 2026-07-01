@@ -9,7 +9,7 @@ import requests
 
 BASE_URL = os.environ.get(
     "REACT_APP_BACKEND_URL",
-    "https://a13cd43d-181e-43e3-a7b9-0c053d68a493.preview.emergentagent.com",
+    "https://code-runner-161.preview.emergentagent.com",
 ).rstrip("/")
 
 API = f"{BASE_URL}/api"

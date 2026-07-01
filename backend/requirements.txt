@@ -9,3 +9,11 @@ httpx==0.28.1
 requests==2.32.3
 numpy==2.1.3
 ta==0.11.0
+pytz
+beautifulsoup4
+html5lib
+lxml
+multitasking
+peewee
+frozendict
+platformdirs
