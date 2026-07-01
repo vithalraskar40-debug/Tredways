@@ -249,13 +249,13 @@ def liquidity_grab_and_retest(df: pd.DataFrame, atr: float) -> LiquidityGrabSign
     """Detect the setup from image #2.
 
     BEARISH setup:
-      1. Prior BOS to the downside (break of a swing low)
+      1. Prior BOS to the downside (break of a swing low)  OR  clear downtrend structure
       2. Price returns UP and grabs liquidity above a prior swing high
       3. Then closes back below that high (LL Failed / trap)
       4. Retest of the trap zone → SHORT
 
     BULLISH setup (mirror):
-      1. Prior BOS to the upside
+      1. Prior BOS to the upside  OR  clear uptrend structure
       2. Price returns DOWN and grabs liquidity below a prior swing low
       3. Then closes back above that low
       4. Retest → LONG
@@ -265,12 +265,12 @@ def liquidity_grab_and_retest(df: pd.DataFrame, atr: float) -> LiquidityGrabSign
         return sig
 
     sw = _swings(df, lookback=3)
-    if len(sw) < 6:
+    if len(sw) < 4:
         return sig
 
     highs = [s for s in sw if s["type"] == "HIGH"]
     lows = [s for s in sw if s["type"] == "LOW"]
-    if len(highs) < 3 or len(lows) < 3:
+    if len(highs) < 2 or len(lows) < 2:
         return sig
 
     last_close = float(df["close"].iloc[-1])
@@ -278,87 +278,94 @@ def liquidity_grab_and_retest(df: pd.DataFrame, atr: float) -> LiquidityGrabSign
     last_low = float(df["low"].iloc[-1])
     last_idx = len(df) - 1
 
-    # ─── BEARISH SETUP ────────────────────────────────────────────────
-    prev_swing_low = lows[-2]
-    prev_swing_high = highs[-1] if highs[-1]["idx"] > prev_swing_low["idx"] else highs[-2]
-    # 1) BOS down: some candle after prev_swing_low broke lows[-3]?
-    older_low = lows[-3]
-    bos_down = df.iloc[prev_swing_low["idx"]:]["low"].min() < older_low["price"]
-    # 2) Grab: recent high pierced prev_swing_high but closed below
-    recent = df.iloc[max(0, last_idx - 20): last_idx + 1]
-    grabbed_high = recent["high"].max() > prev_swing_high["price"] + atr * 0.15
-    closed_back = last_close < prev_swing_high["price"]
-    # 3) Retest: current bar/close is testing the broken high from below
-    retest = abs(last_high - prev_swing_high["price"]) < atr * 0.6 and last_close < prev_swing_high["price"]
+    # Look at the most recent swings within the last 100 bars only
+    recent_lookback = min(100, len(df))
+    recent_start = last_idx - recent_lookback
+    highs_r = [h for h in highs if h["idx"] >= recent_start]
+    lows_r = [l for l in lows if l["idx"] >= recent_start]
+    if len(highs_r) < 2 or len(lows_r) < 2:
+        highs_r, lows_r = highs, lows
 
-    if bos_down and grabbed_high and closed_back:
-        entry = float(prev_swing_high["price"] - atr * 0.1)
-        sl = float(recent["high"].max() + atr * 0.3)
-        risk = abs(sl - entry)
-        tp1 = entry - risk * 1.5
-        tp2 = entry - risk * 2.5
-        tp3 = entry - risk * 4.0
-        reasons = [
-            "BOS to downside confirmed",
-            "Liquidity grabbed above prior swing high",
-            "Closed back below the grabbed level (LL Failed / trap)",
-        ]
-        if retest:
-            reasons.append("Retest of broken high confirmed")
-        sig = LiquidityGrabSignal(
-            direction="SHORT",
-            entry=round(entry, 4),
-            sl=round(sl, 4),
-            tp1=round(tp1, 4),
-            tp2=round(tp2, 4),
-            tp3=round(tp3, 4),
-            rr=round(risk and (abs(tp2 - entry) / risk), 2),
-            grade="A+" if retest else "A",
-            reasons=reasons,
-            bos_price=float(older_low["price"]),
-            grab_price=float(prev_swing_high["price"]),
-            retest_confirmed=retest,
-        )
-        return sig
+    # ─── BEARISH SETUP ────────────────────────────────────────────────
+    if len(highs_r) >= 2 and len(lows_r) >= 2:
+        prev_swing_low = lows_r[-1]
+        prev_swing_high = highs_r[-1]
+        older_low = lows_r[-2] if len(lows_r) >= 2 else lows_r[0]
+        # BOS: broken below any earlier low
+        bos_down = df.iloc[max(0, prev_swing_low["idx"] - 20):]["low"].min() < older_low["price"]
+        # Structure: recent HHs are lower than earlier HHs (downtrend)
+        struct_down = len(highs_r) >= 2 and highs_r[-1]["price"] < highs_r[0]["price"]
+        recent = df.iloc[max(0, last_idx - 20): last_idx + 1]
+        grabbed_high = recent["high"].max() > prev_swing_high["price"] + atr * 0.1
+        closed_back = last_close < prev_swing_high["price"]
+        retest = abs(last_high - prev_swing_high["price"]) < atr * 0.8 and last_close < prev_swing_high["price"]
+        distance_ok = (prev_swing_high["price"] - last_close) < atr * 5
+
+        if (bos_down or struct_down) and grabbed_high and closed_back and distance_ok:
+            entry = float(prev_swing_high["price"] - atr * 0.1)
+            sl = float(recent["high"].max() + atr * 0.3)
+            risk = abs(sl - entry)
+            if risk > 0:
+                tp1 = entry - risk * 1.5
+                tp2 = entry - risk * 2.5
+                tp3 = entry - risk * 4.0
+                reasons = []
+                if bos_down: reasons.append("BOS to downside confirmed")
+                elif struct_down: reasons.append("Downtrend structure (lower highs)")
+                reasons.append("Liquidity grabbed above prior swing high")
+                reasons.append("Closed back below the grabbed level (LL Failed / trap)")
+                if retest: reasons.append("Retest of broken high confirmed")
+                grade = "A+" if (retest and bos_down) else "A" if bos_down else "B"
+                return LiquidityGrabSignal(
+                    direction="SHORT",
+                    entry=round(entry, 4), sl=round(sl, 4),
+                    tp1=round(tp1, 4), tp2=round(tp2, 4), tp3=round(tp3, 4),
+                    rr=round(abs(tp2 - entry) / risk, 2),
+                    grade=grade, reasons=reasons,
+                    bos_price=float(older_low["price"]),
+                    grab_price=float(prev_swing_high["price"]),
+                    retest_confirmed=retest,
+                )
 
     # ─── BULLISH SETUP ────────────────────────────────────────────────
-    prev_swing_high2 = highs[-2]
-    prev_swing_low2 = lows[-1] if lows[-1]["idx"] > prev_swing_high2["idx"] else lows[-2]
-    older_high = highs[-3]
-    bos_up = df.iloc[prev_swing_high2["idx"]:]["high"].max() > older_high["price"]
-    recent = df.iloc[max(0, last_idx - 20): last_idx + 1]
-    grabbed_low = recent["low"].min() < prev_swing_low2["price"] - atr * 0.15
-    closed_back = last_close > prev_swing_low2["price"]
-    retest = abs(last_low - prev_swing_low2["price"]) < atr * 0.6 and last_close > prev_swing_low2["price"]
+    if len(highs_r) >= 2 and len(lows_r) >= 2:
+        prev_swing_high2 = highs_r[-1]
+        prev_swing_low2 = lows_r[-1]
+        older_high = highs_r[-2] if len(highs_r) >= 2 else highs_r[0]
+        bos_up = df.iloc[max(0, prev_swing_high2["idx"] - 20):]["high"].max() > older_high["price"]
+        struct_up = len(lows_r) >= 2 and lows_r[-1]["price"] > lows_r[0]["price"]
+        recent = df.iloc[max(0, last_idx - 20): last_idx + 1]
+        grabbed_low = recent["low"].min() < prev_swing_low2["price"] - atr * 0.1
+        closed_back = last_close > prev_swing_low2["price"]
+        retest = abs(last_low - prev_swing_low2["price"]) < atr * 0.8 and last_close > prev_swing_low2["price"]
+        distance_ok = (last_close - prev_swing_low2["price"]) < atr * 5
 
-    if bos_up and grabbed_low and closed_back:
-        entry = float(prev_swing_low2["price"] + atr * 0.1)
-        sl = float(recent["low"].min() - atr * 0.3)
-        risk = abs(entry - sl)
-        tp1 = entry + risk * 1.5
-        tp2 = entry + risk * 2.5
-        tp3 = entry + risk * 4.0
-        reasons = [
-            "BOS to upside confirmed",
-            "Liquidity grabbed below prior swing low",
-            "Closed back above the grabbed level (HL Failed / trap)",
-        ]
-        if retest:
-            reasons.append("Retest of broken low confirmed")
-        sig = LiquidityGrabSignal(
-            direction="LONG",
-            entry=round(entry, 4),
-            sl=round(sl, 4),
-            tp1=round(tp1, 4),
-            tp2=round(tp2, 4),
-            tp3=round(tp3, 4),
-            rr=round(risk and (abs(tp2 - entry) / risk), 2),
-            grade="A+" if retest else "A",
-            reasons=reasons,
-            bos_price=float(older_high["price"]),
-            grab_price=float(prev_swing_low2["price"]),
-            retest_confirmed=retest,
-        )
+        if (bos_up or struct_up) and grabbed_low and closed_back and distance_ok:
+            entry = float(prev_swing_low2["price"] + atr * 0.1)
+            sl = float(recent["low"].min() - atr * 0.3)
+            risk = abs(entry - sl)
+            if risk > 0:
+                tp1 = entry + risk * 1.5
+                tp2 = entry + risk * 2.5
+                tp3 = entry + risk * 4.0
+                reasons = []
+                if bos_up: reasons.append("BOS to upside confirmed")
+                elif struct_up: reasons.append("Uptrend structure (higher lows)")
+                reasons.append("Liquidity grabbed below prior swing low")
+                reasons.append("Closed back above the grabbed level (HL Failed / trap)")
+                if retest: reasons.append("Retest of broken low confirmed")
+                grade = "A+" if (retest and bos_up) else "A" if bos_up else "B"
+                return LiquidityGrabSignal(
+                    direction="LONG",
+                    entry=round(entry, 4), sl=round(sl, 4),
+                    tp1=round(tp1, 4), tp2=round(tp2, 4), tp3=round(tp3, 4),
+                    rr=round(abs(tp2 - entry) / risk, 2),
+                    grade=grade, reasons=reasons,
+                    bos_price=float(older_high["price"]),
+                    grab_price=float(prev_swing_low2["price"]),
+                    retest_confirmed=retest,
+                )
+
     return sig
 
 

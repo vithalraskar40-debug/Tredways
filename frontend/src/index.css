@@ -270,9 +270,52 @@ input, select { font-family: inherit; }
   border-radius: 14px;
   padding: 12px;
   position: relative;
-  min-height: 460px;
+  min-height: 620px;
 }
-.chart-canvas { width: 100%; height: 460px; }
+.chart-wrap.fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  border-radius: 0;
+  padding: 16px;
+  min-height: 100vh;
+}
+.chart-wrap.fullscreen .chart-inner { height: calc(100vh - 130px); }
+.chart-inner { position: relative; width: 100%; height: 560px; }
+.chart-canvas { width: 100%; height: 100%; }
+.zone-overlay {
+  position: absolute; inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 3;
+}
+.zone-box {
+  position: absolute;
+  border: 1px solid;
+  border-radius: 3px;
+  overflow: hidden;
+}
+.zone-box.reward {
+  background: rgba(34,197,94,0.28);
+  border-color: rgba(34,197,94,0.85);
+  box-shadow: inset 0 0 30px rgba(34,197,94,0.15);
+}
+.zone-box.risk {
+  background: rgba(244,63,94,0.28);
+  border-color: rgba(244,63,94,0.85);
+  box-shadow: inset 0 0 30px rgba(244,63,94,0.15);
+}
+.zone-box .zone-lbl {
+  position: absolute; top: 4px; right: 6px;
+  background: rgba(0,0,0,0.55);
+  color: #fff;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  font-family: 'JetBrains Mono', monospace;
+}
 .chart-toolbar { display: flex; justify-content: space-between; align-items: center; padding: 4px 4px 12px; }
 .chart-toolbar .tfs { display: flex; gap: 4px; }
 .chart-toolbar .tf {

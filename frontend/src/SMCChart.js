@@ -1,33 +1,51 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createChart, CrosshairMode } from 'lightweight-charts';
-import { getChartData, getSMCAnalysis } from './api';
+import { getChartData, getSMCAnalysis, API } from './api';
+
+const TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h', '1d'];
 
 /**
- * SMCChart — TradingView-style candlestick chart with SMC overlays.
+ * SMCChart — TradingView-style candles + EMA(20/50) + volume + SMC overlays.
  *
- * Fixes for user feedback:
- *  • Candle width is small (barSpacing 6 → many candles visible).
- *  • Phase overlays: Accumulation, Manipulation, Distribution
- *  • FVG + Order Block zones drawn as horizontal price bands.
- *  • Emits `onSignal` when a Liquidity Grab & Retest setup is confirmed —
- *    this is what feeds ConfirmTrade so it always receives the signal.
+ * Features requested:
+ *  • Small candles (barSpacing 4, minBarSpacing 1)
+ *  • 30m timeframe added
+ *  • EMA20 / EMA50 trend lines
+ *  • Support / Resistance horizontal lines (from recent swings)
+ *  • Volume histogram (bottom pane)
+ *  • Signal blocks: green box (entry → TP zone) + red box (SL zone) with R:R label
+ *  • Fullscreen toggle
+ *  • Zoom in / zoom out buttons
+ *  • Live-price polling every 2 s (TwelveData WS for gold, REST for FX,
+ *    Yahoo for stocks/crypto) → updates last candle in real time
  */
 export default function SMCChart({ pair, onSignal }) {
+  const wrapRef = useRef(null);
   const containerRef = useRef(null);
   const chartRef = useRef(null);
-  const seriesRef = useRef(null);
+  const candleRef = useRef(null);
+  const volRef = useRef(null);
+  const ema20Ref = useRef(null);
+  const ema50Ref = useRef(null);
+  const priceLinesRef = useRef([]);
+  const overlayRef = useRef(null);
+  const candlesDataRef = useRef([]);
+
   const [timeframe, setTimeframe] = useState('15m');
   const [loading, setLoading] = useState(false);
   const [analysis, setAnalysis] = useState(null);
+  const analysisRef = useRef(null);
   const [lastPrice, setLastPrice] = useState(null);
+  const [liveSource, setLiveSource] = useState('');
   const [error, setError] = useState(null);
+  const [fullscreen, setFullscreen] = useState(false);
 
-  // ── Create chart once
+  // ── Create chart once ────────────────────────────────────────
   useEffect(() => {
     if (!containerRef.current) return;
     const chart = createChart(containerRef.current, {
       width: containerRef.current.clientWidth,
-      height: 460,
+      height: containerRef.current.clientHeight,
       localization: { locale: 'en-US' },
       layout: {
         background: { color: '#0b0f18' },
@@ -40,36 +58,65 @@ export default function SMCChart({ pair, onSignal }) {
         horzLines: { color: '#141b2a' },
       },
       crosshair: { mode: CrosshairMode.Normal },
-      rightPriceScale: { borderColor: '#1a2233', scaleMargins: { top: 0.08, bottom: 0.08 } },
+      rightPriceScale: {
+        borderColor: '#1a2233',
+        scaleMargins: { top: 0.08, bottom: 0.22 },   // leave 22 % for volume
+      },
       timeScale: {
         borderColor: '#1a2233',
         timeVisible: true,
         secondsVisible: false,
-        barSpacing: 6,           // ← thinner candles, more visible on screen
-        minBarSpacing: 2,
+        barSpacing: 4,          // ← thin candles
+        minBarSpacing: 1,
+        rightOffset: 8,
       },
+      handleScroll: { mouseWheel: true, pressedMouseMove: true },
+      handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
     });
-    const series = chart.addCandlestickSeries({
+
+    candleRef.current = chart.addCandlestickSeries({
       upColor: '#22c55e',
       downColor: '#f43f5e',
       wickUpColor: '#22c55e',
       wickDownColor: '#f43f5e',
       borderVisible: false,
     });
+
+    ema20Ref.current = chart.addLineSeries({
+      color: '#ffb020', lineWidth: 1, priceLineVisible: false, lastValueVisible: false, title: 'EMA 20',
+    });
+    ema50Ref.current = chart.addLineSeries({
+      color: '#22d3ee', lineWidth: 1, priceLineVisible: false, lastValueVisible: false, title: 'EMA 50',
+    });
+
+    volRef.current = chart.addHistogramSeries({
+      priceScaleId: 'vol',
+      color: '#26334a',
+      priceFormat: { type: 'volume' },
+    });
+    chart.priceScale('vol').applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+
     chartRef.current = chart;
-    seriesRef.current = series;
 
     const ro = new ResizeObserver(() => {
       if (containerRef.current && chartRef.current) {
-        chartRef.current.applyOptions({ width: containerRef.current.clientWidth });
+        chartRef.current.applyOptions({
+          width: containerRef.current.clientWidth,
+          height: containerRef.current.clientHeight,
+        });
+        redrawOverlay();
       }
     });
     ro.observe(containerRef.current);
 
+    // Redraw overlay boxes on any timescale/pan change
+    chart.timeScale().subscribeVisibleTimeRangeChange(redrawOverlay);
+
     return () => { ro.disconnect(); chart.remove(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── Load candles + SMC analysis when pair or TF changes
+  // ── Load candles + SMC analysis when pair or TF changes ──────
   useEffect(() => {
     let cancelled = false;
     if (!pair) return;
@@ -84,35 +131,60 @@ export default function SMCChart({ pair, onSignal }) {
         ]);
         if (cancelled) return;
 
-        const candles = (chartRes.candles || []).map(c => ({
-          time: Math.floor(c.timestamp / 1000),
-          open: c.open, high: c.high, low: c.low, close: c.close,
-        })).filter(c => Number.isFinite(c.open));
+        const candles = (chartRes.candles || [])
+          .map(c => ({
+            time: Math.floor(c.timestamp / 1000),
+            open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume,
+          }))
+          .filter(c => Number.isFinite(c.open));
 
-        seriesRef.current.setData(candles);
+        candlesDataRef.current = candles;
+        candleRef.current.setData(candles);
+
+        // Volume series
+        volRef.current.setData(candles.map(c => ({
+          time: c.time,
+          value: c.volume || 0,
+          color: c.close >= c.open ? 'rgba(34,197,94,0.35)' : 'rgba(244,63,94,0.35)',
+        })));
+
+        // EMA overlays
+        drawEMA(candles, 20, ema20Ref.current);
+        drawEMA(candles, 50, ema50Ref.current);
+
         setLastPrice(chartRes.live_price ?? candles.at(-1)?.close ?? null);
 
-        // Clear previous overlays and draw SMC ones
-        seriesRef.current.setMarkers([]);
+        // Clear previous overlays
+        clearPriceLines();
+        candleRef.current.setMarkers([]);
+
         if (smc) {
           setAnalysis(smc);
-          drawOverlays(smc, candles);
+          analysisRef.current = smc;
+          drawSMC(smc, candles);
 
-          // Emit signal for TradeConfirm — this is the fix for the missing propagation.
+          // Emit signal for TradeConfirm
           if (smc.liquidity_grab && smc.liquidity_grab.direction !== 'NONE') {
             onSignal && onSignal({
               ...smc.liquidity_grab,
               pair,
               signal_type: smc.liquidity_grab.direction,
               current_price: smc.last_price,
-              price_source: 'Yahoo (SMC engine)',
+              price_source: 'SMC engine',
               source: 'CHART',
               timeframe,
               phase: smc.current_phase,
             });
           }
         }
-        chartRef.current.timeScale().fitContent();
+
+        // Fit last 120 candles into view (not the whole 300 → keeps candles reasonably wide)
+        const N = Math.min(120, candles.length);
+        if (N > 0) {
+          const from = candles[candles.length - N].time;
+          const to   = candles[candles.length - 1].time + 60;
+          chartRef.current.timeScale().setVisibleRange({ from, to });
+        }
       } catch (e) {
         if (!cancelled) setError(e.response?.data?.detail || e.message || 'Failed to load chart');
       } finally {
@@ -121,80 +193,242 @@ export default function SMCChart({ pair, onSignal }) {
     })();
 
     return () => { cancelled = true; };
-  }, [pair, timeframe, onSignal]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pair, timeframe]);
 
-  function drawOverlays(smc, candles) {
-    if (!seriesRef.current || !candles.length) return;
-    const timeAt = (idx) => candles[Math.min(Math.max(idx, 0), candles.length - 1)]?.time;
+  // ── Live-price polling (2 s) ─────────────────────────────────
+  useEffect(() => {
+    if (!pair) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const r = await fetch(`${API}/live-price?symbol=${encodeURIComponent(pair)}`);
+        if (!r.ok) return;
+        const j = await r.json();
+        if (cancelled || !j.price) return;
+        setLastPrice(j.price);
+        setLiveSource(j.source || '');
+        // Update last candle in-place
+        const arr = candlesDataRef.current;
+        if (arr.length && candleRef.current) {
+          const last = { ...arr[arr.length - 1] };
+          last.close = j.price;
+          last.high = Math.max(last.high, j.price);
+          last.low  = Math.min(last.low, j.price);
+          arr[arr.length - 1] = last;
+          candleRef.current.update(last);
+        }
+      } catch { /* ignore */ }
+    };
+    tick();
+    const id = setInterval(tick, 2000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [pair, timeframe]);
 
-    // Clear old price lines
-    (seriesRef.current._priceLines || []).forEach(l => seriesRef.current.removePriceLine(l));
-    seriesRef.current._priceLines = [];
+  // ── Helpers ─────────────────────────────────────────────────
+  function clearPriceLines() {
+    priceLinesRef.current.forEach(l => candleRef.current && candleRef.current.removePriceLine(l));
+    priceLinesRef.current = [];
+  }
 
-    // Liquidity Grab levels
+  function drawEMA(candles, period, series) {
+    if (!series || candles.length < period) return;
+    const k = 2 / (period + 1);
+    let ema = candles.slice(0, period).reduce((s, c) => s + c.close, 0) / period;
+    const out = [{ time: candles[period - 1].time, value: ema }];
+    for (let i = period; i < candles.length; i++) {
+      ema = candles[i].close * k + ema * (1 - k);
+      out.push({ time: candles[i].time, value: ema });
+    }
+    series.setData(out);
+  }
+
+  function drawSMC(smc, candles) {
+    const s = candleRef.current;
+    if (!s || !candles.length) return;
+
+    // Liquidity Grab / Retest — price lines
     const lg = smc.liquidity_grab;
     if (lg && lg.direction !== 'NONE') {
       const add = (p, color, title) => {
         if (p == null) return;
-        const line = seriesRef.current.createPriceLine({
+        priceLinesRef.current.push(s.createPriceLine({
           price: p, color, lineWidth: 2, lineStyle: 0, axisLabelVisible: true, title,
-        });
-        seriesRef.current._priceLines.push(line);
+        }));
       };
       add(lg.entry, '#ffb020', 'ENTRY');
-      add(lg.sl, '#f43f5e', 'SL');
-      add(lg.tp1, '#22c55e', 'TP1');
-      add(lg.tp2, '#16a34a', 'TP2');
-      add(lg.tp3, '#0d5a2a', 'TP3');
+      add(lg.sl,    '#f43f5e', 'SL');
+      add(lg.tp1,   '#22c55e', 'TP1');
+      add(lg.tp2,   '#16a34a', 'TP2');
+      add(lg.tp3,   '#0d5a2a', 'TP3');
       add(lg.grab_price, '#60a5fa', 'GRAB');
-      add(lg.bos_price, '#a78bfa', 'BOS');
+      add(lg.bos_price,  '#a78bfa', 'BOS');
     }
 
-    // Markers for phase boundaries
+    // Support / resistance — from zone highs & lows
+    (smc.zones || []).forEach(z => {
+      if (['ACCUMULATION', 'DISTRIBUTION'].includes(z.kind)) {
+        priceLinesRef.current.push(s.createPriceLine({
+          price: z.top,    color: 'rgba(244,63,94,0.6)', lineWidth: 1, lineStyle: 2, title: `R (${z.kind[0]})`,
+        }));
+        priceLinesRef.current.push(s.createPriceLine({
+          price: z.bottom, color: 'rgba(34,197,94,0.6)', lineWidth: 1, lineStyle: 2, title: `S (${z.kind[0]})`,
+        }));
+      }
+    });
+
+    // Phase markers
     const markers = [];
     (smc.zones || []).forEach(z => {
       if (['ACCUMULATION', 'MANIPULATION', 'DISTRIBUTION'].includes(z.kind)) {
-        const t = timeAt(z.start_idx);
+        const t = candles[Math.min(z.start_idx, candles.length - 1)]?.time;
         if (t) markers.push({
-          time: t,
-          position: 'inBar',
+          time: t, position: 'aboveBar',
           color: z.kind === 'ACCUMULATION' ? '#22c55e' : z.kind === 'MANIPULATION' ? '#60a5fa' : '#f43f5e',
-          shape: 'circle',
-          size: 1,
-          text: z.kind[0],
+          shape: 'circle', size: 1, text: z.kind[0],
         });
       }
     });
-    if (markers.length) seriesRef.current.setMarkers(markers);
+    if (markers.length) s.setMarkers(markers);
+
+    // Trigger overlay redraw for zone-boxes
+    setTimeout(redrawOverlay, 60);
   }
 
-  const TFS = ['1m', '5m', '15m', '1h', '1d'];
+  // ── Signal Zone BOXES  (green = reward zone, red = risk zone) ─
+  function redrawOverlay() {
+    const chart = chartRef.current;
+    const series = candleRef.current;
+    const overlay = overlayRef.current;
+    const smc = analysisRef.current;
+    if (!chart || !series || !overlay || !smc) { if (overlay) overlay.innerHTML = ''; return; }
+    const lg = smc.liquidity_grab;
+    if (!lg || lg.direction === 'NONE' || lg.entry == null || lg.sl == null || lg.tp1 == null) {
+      overlay.innerHTML = '';
+      return;
+    }
+    const now = candlesDataRef.current.at(-1);
+    if (!now) return;
+    // Anchor the zone to the last 20 candles (visible on right side of chart)
+    const arr = candlesDataRef.current;
+    const startTime = arr[Math.max(0, arr.length - 20)].time;
+    const perBar = arr.length >= 2 ? (arr[arr.length - 1].time - arr[arr.length - 2].time) : 900;
+    const endTime = now.time + perBar * 8;
+
+    const x1 = chart.timeScale().timeToCoordinate(startTime);
+    const x2 = chart.timeScale().timeToCoordinate(endTime);
+    if (x1 == null) return;
+    // If endTime is past visible range, clamp to right edge
+    const rightEdge = containerRef.current ? containerRef.current.clientWidth - 60 : 800;
+    const xEnd = x2 == null ? rightEdge : Math.min(x2, rightEdge);
+
+    const entryY = series.priceToCoordinate(lg.entry);
+    const slY    = series.priceToCoordinate(lg.sl);
+    const tpY    = series.priceToCoordinate(lg.tp3 ?? lg.tp2 ?? lg.tp1);
+    if (entryY == null || slY == null || tpY == null) return;
+
+    const risk = Math.abs(lg.entry - lg.sl);
+    const reward = Math.abs((lg.tp3 ?? lg.tp2 ?? lg.tp1) - lg.entry);
+    const rr = risk > 0 ? (reward / risk).toFixed(2) : '—';
+
+    // Reward zone (green) — between entry and TP
+    const rewardTop = Math.min(entryY, tpY);
+    const rewardH = Math.abs(entryY - tpY);
+    // Risk zone (red) — between entry and SL
+    const riskTop = Math.min(entryY, slY);
+    const riskH = Math.abs(entryY - slY);
+    const w = Math.max(60, xEnd - x1);
+
+    overlay.innerHTML = `
+      <div class="zone-box reward" style="left:${x1}px; top:${rewardTop}px; width:${w}px; height:${rewardH}px">
+        <div class="zone-lbl">TARGET · ${lg.direction} · R:R 1:${rr}</div>
+      </div>
+      <div class="zone-box risk" style="left:${x1}px; top:${riskTop}px; width:${w}px; height:${riskH}px">
+        <div class="zone-lbl">STOP LOSS · Risk ${fmtPrice(risk)}</div>
+      </div>
+    `;
+  }
+
+  // Re-run overlay when analysis loads
+  useEffect(() => { redrawOverlay(); }, [analysis]); // eslint-disable-line
+
+  // ── Zoom controls ────────────────────────────────────────────
+  const zoomIn  = useCallback(() => {
+    const ts = chartRef.current?.timeScale(); if (!ts) return;
+    const opts = ts.options();
+    ts.applyOptions({ barSpacing: Math.min(30, (opts.barSpacing || 4) * 1.5) });
+    setTimeout(redrawOverlay, 40);
+  }, []);
+  const zoomOut = useCallback(() => {
+    const ts = chartRef.current?.timeScale(); if (!ts) return;
+    const opts = ts.options();
+    ts.applyOptions({ barSpacing: Math.max(1, (opts.barSpacing || 4) / 1.5) });
+    setTimeout(redrawOverlay, 40);
+  }, []);
+  const fitAll = useCallback(() => {
+    chartRef.current?.timeScale().fitContent();
+    setTimeout(redrawOverlay, 40);
+  }, []);
+
+  const toggleFullscreen = useCallback(() => {
+    setFullscreen(f => !f);
+    setTimeout(() => {
+      if (chartRef.current && containerRef.current) {
+        chartRef.current.applyOptions({
+          width: containerRef.current.clientWidth,
+          height: containerRef.current.clientHeight,
+        });
+        redrawOverlay();
+      }
+    }, 100);
+  }, []);
 
   return (
-    <div className="chart-wrap" data-testid="smc-chart">
+    <div className={`chart-wrap ${fullscreen ? 'fullscreen' : ''}`} data-testid="smc-chart" ref={wrapRef}>
       <div className="chart-toolbar">
         <div>
           <div style={{ fontWeight: 900, fontSize: 16, letterSpacing: '-0.02em' }}>
             {(pair || '--').toUpperCase()}{' '}
-            {lastPrice != null && <span className="mono" style={{ color: 'var(--accent)' }}>{formatPrice(lastPrice)}</span>}
+            {lastPrice != null && (
+              <span className="mono" style={{ color: 'var(--accent)' }}>
+                {fmtPrice(lastPrice)}
+                {liveSource && <span className="small" style={{ marginLeft: 8 }}>· {liveSource}</span>}
+              </span>
+            )}
           </div>
           <div className="small">
-            {analysis ? <>Phase: <b>{analysis.current_phase}</b> · ATR {analysis.atr}</> : '—'}
+            {analysis
+              ? <>Phase: <b>{analysis.current_phase}</b> · ATR {analysis.atr}
+                 {analysis.liquidity_grab?.direction !== 'NONE'
+                   ? <> · Setup: <b style={{ color: analysis.liquidity_grab.direction === 'LONG' ? 'var(--long)' : 'var(--short)' }}>{analysis.liquidity_grab.direction} {analysis.liquidity_grab.grade}</b></>
+                   : null}</>
+              : '—'}
           </div>
         </div>
-        <div className="tfs">
-          {TFS.map(t => (
-            <button
-              key={t}
-              className={`tf ${timeframe === t ? 'active' : ''}`}
-              onClick={() => setTimeframe(t)}
-              data-testid={`tf-${t}`}
-            >{t}</button>
-          ))}
+        <div style={{ display: 'flex', gap: 4, alignItems: 'center', flexWrap: 'wrap' }}>
+          <div className="tfs">
+            {TIMEFRAMES.map(t => (
+              <button
+                key={t}
+                className={`tf ${timeframe === t ? 'active' : ''}`}
+                onClick={() => setTimeframe(t)}
+                data-testid={`tf-${t}`}
+              >{t}</button>
+            ))}
+          </div>
+          <button className="tf" onClick={zoomOut} title="Zoom out" data-testid="zoom-out">−</button>
+          <button className="tf" onClick={zoomIn} title="Zoom in" data-testid="zoom-in">+</button>
+          <button className="tf" onClick={fitAll} title="Fit all" data-testid="fit-all">⊡</button>
+          <button className="tf" onClick={toggleFullscreen} title="Fullscreen" data-testid="fullscreen">
+            {fullscreen ? '×' : '⛶'}
+          </button>
         </div>
       </div>
 
-      <div ref={containerRef} className="chart-canvas" data-testid="chart-canvas" />
+      <div className="chart-inner">
+        <div ref={containerRef} className="chart-canvas" data-testid="chart-canvas" />
+        <div ref={overlayRef} className="zone-overlay" />
+      </div>
 
       {loading && <div className="loading"><div className="spinner" /> LOADING {(pair || '').toUpperCase()}…</div>}
       {error && <div className="reason-row" style={{ color: '#f87171' }}>{error}</div>}
@@ -203,18 +437,19 @@ export default function SMCChart({ pair, onSignal }) {
         <span className="phase-pill acc"><span className="sw" style={{ background: '#22c55e' }} /> Accumulation</span>
         <span className="phase-pill man"><span className="sw" style={{ background: '#60a5fa' }} /> Manipulation</span>
         <span className="phase-pill dis"><span className="sw" style={{ background: '#f43f5e' }} /> Distribution</span>
-        <span className="phase-pill fvg"><span className="sw" style={{ background: '#22d3ee' }} /> FVG</span>
-        <span className="phase-pill ob"><span className="sw" style={{ background: '#ffb020' }} /> Order Block</span>
+        <span className="phase-pill ob"><span className="sw" style={{ background: '#ffb020' }} /> EMA 20</span>
+        <span className="phase-pill fvg"><span className="sw" style={{ background: '#22d3ee' }} /> EMA 50</span>
       </div>
     </div>
   );
 }
 
-function formatPrice(n) {
-  if (n == null || !Number.isFinite(n)) return '—';
-  const abs = Math.abs(n);
-  if (abs < 1) return n.toFixed(5);
-  if (abs < 100) return n.toFixed(4);
-  if (abs < 10000) return n.toFixed(2);
-  return n.toLocaleString('en-US', { maximumFractionDigits: 2 });
+function fmtPrice(n) {
+  if (n == null || !Number.isFinite(+n)) return '—';
+  const v = +n;
+  const abs = Math.abs(v);
+  if (abs < 1) return v.toFixed(5);
+  if (abs < 100) return v.toFixed(4);
+  if (abs < 10000) return v.toFixed(2);
+  return v.toLocaleString('en-US', { maximumFractionDigits: 2 });
 }

@@ -33,7 +33,14 @@ All external calls flow through `/api/*` on port 8001 (Kubernetes ingress requir
 
 ### Frontend (new, from scratch)
 - Clean React 18 web app with **TradingView-style candlestick chart** using `lightweight-charts`.
-- **Candle size fix** — barSpacing 6 (thin candles), minBarSpacing 2, showing 300 candles per view.
+- **Candle size fix** — barSpacing 4 (thin candles), minBarSpacing 1, ~120-candle default view.
+- **EMA 20 & EMA 50 trend lines** (amber + cyan) overlaid on candles.
+- **Volume histogram** bottom pane (green/red bars from candle direction).
+- **Support / Resistance** dashed horizontal lines from SMC zone highs/lows.
+- **Signal ZONE BOXES** (like the user's reference image): filled green rectangle from entry → TP3 with "TARGET · LONG/SHORT · R:R" label, filled red rectangle from entry → SL with "STOP LOSS · Risk". All levels also drawn as labelled price lines (ENTRY, SL, TP1, TP2, TP3, GRAB, BOS).
+- **30 m timeframe** added alongside 1m/5m/15m/1h/1d.
+- **Zoom in / zoom out / fit / fullscreen** toolbar buttons.
+- **Live-price polling every 2 s** via `/api/live-price` — TwelveData WS for XAU/USD, TwelveData REST for FX, Yahoo v8 quote for stocks/crypto — updates the last candle in real time.
 - **Signal stability fix** — new hysteresis logic in App.js (`stabilityRef`): a new LONG/SHORT direction must repeat for 2 consecutive polls before replacing the last emitted signal. Prevents the flicker between buy/sell.
 - **TradeConfirm receives ChartWithZones signal** — `SMCChart` component calls `onSignal(...)` when a Liquidity Grab & Retest setup is confirmed by the SMC engine; that signal flows into `chartSignal` state in `App.js` and is passed to `ConfirmScreen`. Previously the mobile app never wired this bridge.
 - **AutoBot restored (2026-01-01, revised)** — Per user's clarification, the Accuracy Tracker **auto-logs every BUY / SELL signal** as soon as the analyze engine (Stocks + Forex) or the SMC chart engine confirms one. Deduped by pair + direction + entry-within-0.3%. This lets the user measure the app's overall accuracy and profit (R multiples) hands-off.

@@ -517,6 +517,67 @@ app.post('/api/v1/analyze', async (req, res) => {
   res.json(signal);
 });
 
+// Direct Yahoo v8 quote fetcher — more reliable than yahoo-finance2 library.
+async function yahooV8Quote(yfSym) {
+  try {
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yfSym)}?interval=1m&range=1d`;
+    const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    if (!r.ok) return null;
+    const j = await r.json();
+    return j?.chart?.result?.[0]?.meta?.regularMarketPrice ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// ────────────────────────────────────────────────────────────────
+// LIVE PRICE  — polled every ~2s by the frontend chart
+// Uses TwelveData WS cache for XAU/USD, TwelveData REST for FX,
+// Yahoo v8 for everything else.
+// ────────────────────────────────────────────────────────────────
+app.get('/api/v1/live-price', async (req, res) => {
+  const raw = String(req.query.symbol || req.query.pair || '').toUpperCase().replace(/[-/_]/g, '');
+  if (!raw) return res.status(400).json({ error: 'symbol required' });
+  try {
+    // 1) Gold — TwelveData WS cache first (0 API calls)
+    if (/^(GOLD|XAU|XAUUSD)$/.test(raw)) {
+      const cache = forexState && forexState.tdCache && forexState.tdCache['td_live_XAU/USD'];
+      if (cache && Date.now() - cache.time < 60000) {
+        return res.json({ symbol: 'XAU/USD', price: cache.data, source: 'TwelveData WS', ts: cache.time });
+      }
+      // Fallback: Yahoo GC=F
+      const p = await yahooV8Quote('GC=F');
+      if (p != null) return res.json({ symbol: 'GOLD', price: +p, source: 'Yahoo GC=F', ts: Date.now() });
+    }
+    // 2) Forex 6-letter pairs — TwelveData REST first, then Yahoo v8
+    if (/^[A-Z]{6}$/.test(raw) && !/^(BTC|ETH|SOL|XRP|DOGE|BNB)/.test(raw)) {
+      const apiKey = process.env.TWELVE_DATA_API_KEY;
+      if (apiKey) {
+        try {
+          const sym = raw.slice(0, 3) + '/' + raw.slice(3);
+          const r = await fetch(`https://api.twelvedata.com/price?symbol=${encodeURIComponent(sym)}&apikey=${apiKey}`);
+          const j = await r.json();
+          if (j && j.price) return res.json({ symbol: sym, price: +j.price, source: 'TwelveData REST', ts: Date.now() });
+        } catch { /* fall through */ }
+      }
+      const p = await yahooV8Quote(raw + '=X');
+      if (p != null) return res.json({ symbol: raw, price: +p, source: 'Yahoo FX', ts: Date.now() });
+    }
+    // 3) Everything else — Yahoo v8
+    let yf = raw;
+    if (/^(BTC|ETH|SOL|XRP|DOGE|BNB)/.test(raw)) yf = raw.replace('USD', '') + '-USD';
+    else if (raw === 'NIFTY' || raw === 'NIFTY50') yf = '^NSEI';
+    else if (raw === 'BANKNIFTY') yf = '^NSEBANK';
+    else if (raw === 'SENSEX') yf = '^BSESN';
+    else if (!yf.includes('.') && !yf.startsWith('^')) yf += '.NS';
+    const p = await yahooV8Quote(yf);
+    if (p != null) return res.json({ symbol: raw, price: +p, source: 'Yahoo', ts: Date.now() });
+    res.status(404).json({ error: 'price not found' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/v1/angel-price', async (req, res) => {
   const { ticker } = req.body || {};
   if (!ticker) return res.status(400).json({ error: 'Ticker is required' });

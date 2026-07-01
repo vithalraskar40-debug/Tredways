@@ -175,6 +175,7 @@ TF_MAP = {
     "1m":  ("1m",  "5d"),
     "5m":  ("5m",  "60d"),
     "15m": ("15m", "60d"),
+    "30m": ("30m", "60d"),
     "1h":  ("60m", "730d"),
     "4h":  ("60m", "730d"),
     "1d":  ("1d",  "2y"),
@@ -235,6 +236,19 @@ async def _proxy(path: str, method: str = "POST", json: Optional[dict] = None) -
             return r.json()
     except httpx.ConnectError as exc:
         raise HTTPException(status_code=503, detail=f"Node backend unreachable: {exc}") from exc
+
+
+@api.get("/live-price")
+async def live_price(symbol: str):
+    url = f"{NODE_BACKEND_URL}/api/v1/live-price?symbol={symbol}"
+    try:
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            r = await client.get(url)
+            if r.status_code >= 400:
+                raise HTTPException(status_code=r.status_code, detail=r.text)
+            return r.json()
+    except httpx.ConnectError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @api.post("/analyze")
