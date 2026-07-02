@@ -214,10 +214,17 @@ export default function SMCChart({ pair, onSignal }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pair, timeframe]);
 
-  // ── Live-price polling (2 s) ─────────────────────────────────
+  // ── Live-price polling (2 s) — safely append/update the last candle
+  //    so a stale Yahoo bar isn't stretched to the live TwelveData price
+  //    (which would produce a fake vertical spike candle).
   useEffect(() => {
     if (!pair) return;
     let cancelled = false;
+
+    const tfSec = tfToSeconds(timeframe);
+    const MAX_SANE_JUMP_PCT = 0.02;   // 2 % — anything more than this away from the last candle
+                                       // close means the last candle is stale → append instead of stretch.
+
     const tick = async () => {
       try {
         const r = await fetch(`${API}/live-price?symbol=${encodeURIComponent(pair)}`);
@@ -226,21 +233,87 @@ export default function SMCChart({ pair, onSignal }) {
         if (cancelled || !j.price) return;
         setLastPrice(j.price);
         setLiveSource(j.source || '');
-        // Update last candle in-place
+
         const arr = candlesDataRef.current;
-        if (arr.length && candleRef.current) {
-          const last = { ...arr[arr.length - 1] };
-          last.close = j.price;
-          last.high = Math.max(last.high, j.price);
-          last.low  = Math.min(last.low, j.price);
-          arr[arr.length - 1] = last;
-          candleRef.current.update(last);
+        if (!arr.length || !candleRef.current) return;
+
+        const nowSec = Math.floor(Date.now() / 1000);
+        const currentBarStart = Math.floor(nowSec / tfSec) * tfSec;
+        const last = arr[arr.length - 1];
+        const price = +j.price;
+        const jumpPct = last.close > 0 ? Math.abs(price - last.close) / last.close : 0;
+
+        // Case 1: we're now in a NEW bar interval (last bar has closed).
+        // Case 2: last bar is stale AND price jumped > 2 % — bar is way too old, create a new one.
+        const needNewBar =
+          currentBarStart > last.time ||
+          (jumpPct > MAX_SANE_JUMP_PCT && (nowSec - last.time) > tfSec);
+
+        if (needNewBar) {
+          const barTime = Math.max(currentBarStart, last.time + tfSec);
+          const newCandle = {
+            time: barTime,
+            open: price,
+            high: price,
+            low: price,
+            close: price,
+            volume: 0,
+          };
+          arr.push(newCandle);
+          candleRef.current.update(newCandle);
+        } else if (currentBarStart === last.time || nowSec - last.time < tfSec) {
+          // Update the current live bar
+          const updated = { ...last };
+          updated.close = price;
+          updated.high = Math.max(updated.high, price);
+          updated.low = Math.min(updated.low, price);
+          arr[arr.length - 1] = updated;
+          candleRef.current.update(updated);
+        }
+        // else: clock skew — do nothing
+      } catch { /* ignore */ }
+    };
+
+    // Periodically refetch chart-data to close gaps and prevent long-term drift
+    const refetchGuard = { id: null };
+    const refetchChart = async () => {
+      try {
+        const chartRes = await getChartData(pair, timeframe);
+        if (cancelled) return;
+        const candles = (chartRes.candles || [])
+          .map(c => ({
+            time: Math.floor((c.timestamp ?? Date.parse(c.datetime)) / 1000),
+            open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume,
+          }))
+          .filter(c => Number.isFinite(c.time) && Number.isFinite(c.open));
+        if (candles.length >= 60) {
+          candlesDataRef.current = candles;
+          candleRef.current && candleRef.current.setData(candles);
+          if (volRef.current) {
+            volRef.current.setData(candles.map(c => ({
+              time: c.time,
+              value: c.volume || 0,
+              color: c.close >= c.open ? 'rgba(34,197,94,0.35)' : 'rgba(244,63,94,0.35)',
+            })));
+          }
+          drawEMA(candles, 20, ema20Ref.current);
+          drawEMA(candles, 50, ema50Ref.current);
+          drawTrendlines(candles);
         }
       } catch { /* ignore */ }
     };
+
     tick();
     const id = setInterval(tick, 2000);
-    return () => { cancelled = true; clearInterval(id); };
+    // Refetch full chart every 45 s (or ½ × timeframe for shorter TFs) to close any drift
+    const refetchMs = Math.max(20000, Math.min(60000, tfSec * 500));
+    refetchGuard.id = setInterval(refetchChart, refetchMs);
+
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+      if (refetchGuard.id) clearInterval(refetchGuard.id);
+    };
   }, [pair, timeframe]);
 
   // ── Helpers ─────────────────────────────────────────────────
@@ -576,4 +649,9 @@ function fmtPrice(n) {
   if (abs < 100) return v.toFixed(4);
   if (abs < 10000) return v.toFixed(2);
   return v.toLocaleString('en-US', { maximumFractionDigits: 2 });
+}
+
+function tfToSeconds(tf) {
+  const map = { '1m': 60, '5m': 300, '15m': 900, '30m': 1800, '1h': 3600, '4h': 14400, '1d': 86400, '1w': 604800 };
+  return map[tf] || 300;
 }
