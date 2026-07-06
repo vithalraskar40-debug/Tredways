@@ -10,41 +10,46 @@
 ---
 
 ## user_problem_statement
-"gold last candle not formed well why" — user compared TradingView (XAUUSD ~4072, normal small candles) with our app (XAUUSD 1m showing a huge fake red spike candle from ~4088 down to 4072). The stale Yahoo last candle was being force-stretched by the live TwelveData price, creating a fake vertical bar.
+"SEE ACCURACY TRACKER TAKES ONLY TRADE BUT ITS NOT HIT TARGET NOR STOP LOSS WIN RATE 0 ITS NOT CHECKING APP PERFORMANCE. NOT SHOW APP ACCURACY ITS SHOULD CHECK AUTOMATICALLY" — screenshot shows 10 open trades, 0 wins/losses, 0% win rate. User wants the tracker to automatically check TP/SL hits in the background.
 
-## Bug Fix Applied (Live-price stretches stale candle into a fake spike)
-**File:** `/app/frontend/src/SMCChart.js`
+## Bug Fix + Enhancement — Accuracy Tracker auto-check
+**Backend files:** `/app/backend/server.py`
+**Frontend files:** `/app/frontend/src/api.js`, `/app/frontend/src/tradeHistory.js`, `/app/frontend/src/App.js`
 
-**Root cause:**
-The live-price polling `tick()` unconditionally did `last.close = price; last.low = min(last.low, price); last.high = max(last.high, price)` on `arr[arr.length - 1]`. When the Yahoo chart-data last candle was stale (Yahoo has ~15-min lag) AND the live TwelveData price was already several dollars away, this stretched the OLD bar's low/close down to the current price, producing a huge artificial spike candle. The SMC engine then read that fake wick and mis-classified the phase.
+**Root causes:**
+1. Outcome check was manual-only (required clicking "Auto-check Open Trades" button every time).
+2. The old check compared TP/SL only against the CURRENT live price — completely missing TP or SL touches that had already happened (if price bounced back to entry, the trade stayed OPEN forever).
+3. Live-price fetch was from browser to Yahoo (CORS-fragile).
 
 **Fixes:**
-1. Added `tfToSeconds(tf)` helper for interval seconds.
-2. In `tick()` we now compute `currentBarStart = floor(nowSec / tfSec) * tfSec`.
-3. If `currentBarStart > last.time` OR the price jumped > 2 % AND the last bar is older than one timeframe → **APPEND a new candle** at the correct bar-start (open=high=low=close=price). Never stretch the stale bar.
-4. Otherwise (still within the current bar interval) → update in-place as before.
-5. Added a periodic chart refetch (20–60 s depending on TF) to close any drift and pull in fresh Yahoo bars so gaps stay small.
+1. New backend endpoint `POST /api/check-trades` — takes a batch of open trades and, for each, fetches candle history since the trade's `created_at` and walks bar-by-bar checking if the high touched TP1 or the low touched SL (LONG); mirror for SHORT. Returns WIN / LOSS / OPEN + the close price and closed_at timestamp. Uses appropriate interval (1m up to 5d age, 5m up to 25d, 15m up to 55d, 1h beyond).
+2. New frontend helper `checkOpenTradesViaBackend(checkTrades)` that posts open trades and applies resolutions to localStorage.
+3. **Global background auto-checker in App.js** runs every 45 s regardless of active tab AND on window focus. Emits `tredways:trades-resolved` CustomEvent for any UI listener.
+4. `AccuracyScreen` now listens to that event, refreshes the trade list every 15 s, shows "Last check: HH:MM:SS", and the "Auto-check Open Trades" button becomes a manual force-refresh.
 
-## Test Instructions for auto_frontend_testing_agent
-- Open the running Tredways web app at the preview URL.
-- Click **FOREX / CRYPTO** tab, enter `GOLD` (or `XAUUSD`), click the analyze / load button, wait for the SMCChart to render.
-- Switch to `1m` timeframe.
-- Observe the chart for at least 60 seconds. Verify that:
-  - The last candle is a NORMAL-sized candle whose body/wick is comparable to neighboring candles (not a giant vertical spike 5–20× the size of others).
-  - The XAUUSD price shown in the header matches the live TwelveData price (~4070–4075 range).
-  - The Phase label at the top-left is reasonable (Accumulation / Manipulation / Distribution / Neutral).
-- Repeat on `5m` and `15m` timeframes.
-- Wait through at least ONE minute-boundary crossing on 1m to confirm a NEW small candle appears (rather than the previous bar being stretched).
-
-**Success criteria:** No fake vertical spike bar; last candle size is visually consistent with neighbours; price header matches live tick within a few points.
-
-**Failure criteria:** A giant single-candle vertical bar sticking out of the chart, or the last candle body larger than 5× the median body of the last 30 bars.
+## Test Instructions for deep_testing_backend_v2
+- `POST /api/check-trades` with a body like:
+  ```json
+  {"trades":[
+    {"id":"t1","pair":"BTCUSD","signal_type":"LONG","entry":58000,"sl":57500,"tp1":59000,"created_at":"2026-06-30T00:00:00Z"},
+    {"id":"t2","pair":"RELIANCE","signal_type":"LONG","entry":1500,"sl":1480,"tp1":1520,"created_at":"2026-06-29T00:00:00Z"},
+    {"id":"t3","pair":"GOLD","signal_type":"SHORT","entry":4200,"sl":4230,"tp1":4160,"created_at":"2026-06-30T00:00:00Z"},
+    {"id":"t4","pair":"EURUSD","signal_type":"LONG","entry":1.1000,"sl":1.0950,"tp1":1.1100,"created_at":"2026-06-30T00:00:00Z"}
+  ]}
+  ```
+  Expected: HTTP 200 with `{checked, resolved, results: [{id, outcome ∈ WIN|LOSS|OPEN, close_price, closed_at}]}`. At least one should resolve (BTC has moved enough).
+- Test edge cases:
+  - Empty trades list → `checked:0, resolved:0, results:[]`.
+  - Invalid pair (`"pair":"XXXNONE"`) → OPEN outcome, no error.
+  - Missing `created_at` (should default to using most recent candles) → returns without crashing.
+- Verify all other existing endpoints still work: `/api/health`, `/api/opportunities`, `/api/smc-analyze`, `/api/chart-data`, `/api/analyze`, `/api/analyze-forex`.
 
 ## Communication Log
 
 ### agent → main
-- Fixed live-price polling to append new candles at bar boundaries instead of stretching stale bars; added periodic chart refetch to close drift.
-- Awaiting frontend testing agent verification.
+- Added `POST /api/check-trades` (walks candle history for proper TP/SL hit detection) + global 45s background auto-checker in App.js + AccuracyScreen event listener.
+- Manual verification: curl on BTC LONG with entry $58k → resolved as WIN @ $59k.
+- Ready for automated backend testing.
 
 
 ### testing_agent → main (2025-07-01)
@@ -153,3 +158,52 @@ The live-price polling `tick()` unconditionally did `last.close = price; last.lo
 ✅ Tested across multiple symbols (GOLD, BTCUSD, RELIANCE) and timeframes (1m, 5m, 15m)
 
 **Verdict: PASS** - The giant spike candle bug is fixed. Live-price polling now correctly appends new candles at bar boundaries instead of stretching stale bars.
+
+
+### testing_agent → main (2025-07-06 - /api/check-trades Endpoint Testing)
+- ✅ **ALL BACKEND TESTS PASSED**
+
+**1. /api/check-trades Endpoint - NEW ✅**
+
+**Test 1: Happy Path — Mixed Batch (4 trades) ✅**
+- Tested with BTCUSD LONG, RELIANCE LONG, GOLD SHORT, EURUSD LONG
+- HTTP 200 with correct response shape: `{checked: 4, resolved: 4, results: [...]}`
+- All 4 trades resolved: 3 WIN, 1 LOSS
+- Each result has required fields: `id`, `outcome`, `close_price`, `closed_at`
+- IDs match input trades
+- Outcomes are valid (WIN/LOSS/OPEN)
+- **CRITICAL: All 4 trades resolved (exceeds requirement of at least 1)**
+
+**Test 2: Empty Batch ✅**
+- HTTP 200 with `{checked: 0, resolved: 0, results: []}`
+- No crash, correct empty response
+
+**Test 3: Invalid Symbol (XXXNONE) ✅**
+- HTTP 200 with `outcome: "OPEN"`, `close_price: null`
+- No crash, graceful handling of invalid symbol
+
+**Test 4: Old Trade (10 days ago, 5m interval branch) ✅**
+- NIFTY LONG trade from 10 days ago
+- HTTP 200, resolved as WIN (TP hit at 24000)
+- Correctly used 5m interval for 10-day-old trade
+- No crash
+
+**Test 5: Missing created_at ✅**
+- RELIANCE LONG without created_at field
+- HTTP 200, resolved as LOSS
+- No crash, defaults to recent candles
+
+**2. Regression Tests ✅**
+- GET /api/health → 200 with `{"python":"ok","node_backend":"ok"}`
+- GET /api/opportunities?symbols=GOLD,BTCUSD&timeframes=1h&min_grade=B → 200 with count: 0
+- POST /api/smc-analyze (GOLD 1h) → 200 with valid response
+- POST /api/chart-data (RELIANCE 15m) → 200 with valid response
+
+**Summary:**
+- All 6 test cases passed
+- No 5xx errors encountered
+- Response shapes match specification
+- At least one trade resolved in happy path (actually all 4 resolved)
+- Edge cases handled gracefully (empty batch, invalid symbol, missing created_at)
+- All regression endpoints continue to work correctly
+- The new /api/check-trades endpoint is fully functional and production-ready

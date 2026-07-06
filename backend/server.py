@@ -356,6 +356,109 @@ async def opportunities(
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# Trade outcome checker — walks candle history bar-by-bar since `created_at`
+# and returns WIN/LOSS/OPEN for each open trade. Handles the case where price
+# TOUCHED TP or SL (wick) even if it later returned back to entry.
+# ────────────────────────────────────────────────────────────────────────────
+class OpenTrade(BaseModel):
+    id: str
+    pair: str
+    signal_type: str            # LONG or SHORT
+    entry: float
+    sl: float
+    tp1: float
+    created_at: Optional[str] = None    # ISO timestamp of trade open
+
+
+class CheckTradesRequest(BaseModel):
+    trades: list[OpenTrade]
+
+
+@api.post("/check-trades")
+async def check_trades(req: CheckTradesRequest):
+    """Given a batch of open trades, return the outcome of each by walking
+    candle history since `created_at`. Fetches 1-minute candles for accuracy.
+    """
+    import asyncio
+    from datetime import datetime, timezone
+
+    async def _check_one(t: OpenTrade) -> dict:
+        try:
+            # Choose interval: 1m gives best precision for intraday; fallback to 5m if 1m
+            # doesn't cover the age of the trade (Yahoo caps 1m to ~5 days).
+            if t.created_at:
+                try:
+                    opened = datetime.fromisoformat(t.created_at.replace("Z", "+00:00"))
+                    age_days = (datetime.now(timezone.utc) - opened).total_seconds() / 86400
+                except Exception:
+                    age_days = 0
+            else:
+                age_days = 0
+            if age_days < 4:
+                interval, period = "1m", "5d"
+            elif age_days < 25:
+                interval, period = "5m", "60d"
+            elif age_days < 55:
+                interval, period = "15m", "60d"
+            else:
+                interval, period = "1h", "730d"
+
+            candles = await asyncio.to_thread(fetch_yf_candles, t.pair, interval, period)
+            if not candles:
+                return {"id": t.id, "outcome": "OPEN", "close_price": None, "closed_at": None}
+
+            # Filter candles to those AT or AFTER trade creation time
+            if t.created_at:
+                try:
+                    opened_ms = int(datetime.fromisoformat(t.created_at.replace("Z", "+00:00")).timestamp() * 1000)
+                    candles = [c for c in candles if c.get("timestamp", 0) >= opened_ms - 60_000]
+                except Exception:
+                    pass
+
+            if not candles:
+                return {"id": t.id, "outcome": "OPEN", "close_price": None, "closed_at": None}
+
+            is_long = t.signal_type.upper() == "LONG"
+            for c in candles:
+                hi, lo = float(c["high"]), float(c["low"])
+                if is_long:
+                    hit_tp = hi >= t.tp1
+                    hit_sl = lo <= t.sl
+                else:
+                    hit_tp = lo <= t.tp1
+                    hit_sl = hi >= t.sl
+                # If both hit in the same candle, we assume SL first (conservative).
+                if hit_sl:
+                    return {
+                        "id": t.id,
+                        "outcome": "LOSS",
+                        "close_price": t.sl,
+                        "closed_at": pd.Timestamp(c["timestamp"], unit="ms", tz="UTC").isoformat(),
+                    }
+                if hit_tp:
+                    return {
+                        "id": t.id,
+                        "outcome": "WIN",
+                        "close_price": t.tp1,
+                        "closed_at": pd.Timestamp(c["timestamp"], unit="ms", tz="UTC").isoformat(),
+                    }
+            # Neither hit → still OPEN. Return current live price for reference.
+            return {
+                "id": t.id,
+                "outcome": "OPEN",
+                "close_price": float(candles[-1]["close"]),
+                "closed_at": None,
+            }
+        except Exception as exc:
+            log.warning("check-trade failed for %s (%s): %s", t.pair, t.id, exc)
+            return {"id": t.id, "outcome": "OPEN", "close_price": None, "closed_at": None}
+
+    results = await asyncio.gather(*[_check_one(t) for t in req.trades])
+    resolved = [r for r in results if r["outcome"] != "OPEN"]
+    return {"checked": len(results), "resolved": len(resolved), "results": results}
+
+
+# ────────────────────────────────────────────────────────────────────────────
 app.include_router(api)
 
 

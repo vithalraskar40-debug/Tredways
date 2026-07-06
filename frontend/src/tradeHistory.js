@@ -140,3 +140,40 @@ export async function checkOpenTradesLive(fetchLive) {
   }
   return resolved;
 }
+
+/**
+ * Check open trades via the backend `/check-trades` endpoint. The backend walks
+ * CANDLE HISTORY since each trade's created_at and correctly detects TP or SL
+ * hits even if price later returned to entry (unlike checking only current
+ * price). Returns the array of resolved trades.
+ */
+export async function checkOpenTradesViaBackend(checkFn) {
+  const trades = getAllTrades();
+  const open = trades.filter(t => t.outcome === 'OPEN' && t.entry && t.sl && t.tp1);
+  if (!open.length) return [];
+  const payload = open.map(t => ({
+    id: t.id,
+    pair: t.pair,
+    signal_type: t.signal_type,
+    entry: Number(t.entry),
+    sl: Number(t.sl),
+    tp1: Number(t.tp1),
+    created_at: t.created_at,
+  }));
+  const { results } = await checkFn(payload);
+  const resolved = [];
+  for (const r of results || []) {
+    if (r.outcome === 'WIN' || r.outcome === 'LOSS') {
+      updateTradeOutcome(r.id, r.outcome, r.close_price);
+      const t = open.find(x => x.id === r.id);
+      resolved.push({
+        id: r.id,
+        pair: t?.pair,
+        outcome: r.outcome,
+        closePrice: r.close_price,
+        closedAt: r.closed_at,
+      });
+    }
+  }
+  return resolved;
+}

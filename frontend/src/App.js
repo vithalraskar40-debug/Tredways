@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import SMCChart from './SMCChart';
 import OpportunityTicker from './OpportunityTicker';
-import { analyzeStock, analyzeForex, getHealth, getScanner } from './api';
+import { analyzeStock, analyzeForex, getHealth, getScanner, checkTrades } from './api';
 import {
   saveTrade, getAllTrades, updateTradeOutcome, clearAllTrades,
-  computeStats, checkOpenTradesLive, hasSimilarOpenTrade,
+  computeStats, checkOpenTradesViaBackend, hasSimilarOpenTrade,
 } from './tradeHistory';
 
 const TABS = [
@@ -28,6 +28,29 @@ export default function App() {
 
   useEffect(() => {
     getHealth().then(h => setNodeStatus(h.node_backend)).catch(() => setNodeStatus('down'));
+  }, []);
+
+  // ── Global background auto-checker for the Accuracy Tracker ──
+  // Runs every 45 s regardless of which tab is currently open, so trades that
+  // touch TP or SL are resolved even if the user is browsing other tabs.
+  // Also runs when the browser tab regains focus.
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      try {
+        const openTrades = getAllTrades().filter(t => t.outcome === 'OPEN');
+        if (!openTrades.length) return;
+        const resolved = await checkOpenTradesViaBackend(checkTrades);
+        if (!cancelled && resolved.length) {
+          window.dispatchEvent(new CustomEvent('tredways:trades-resolved', { detail: resolved }));
+        }
+      } catch { /* silent */ }
+    };
+    run();
+    const id = setInterval(run, 45000);
+    const onFocus = () => run();
+    window.addEventListener('focus', onFocus);
+    return () => { cancelled = true; clearInterval(id); window.removeEventListener('focus', onFocus); };
   }, []);
 
   // Signal debounce/hysteresis — prevents flip-flop between LONG/SHORT on every poll.
@@ -419,9 +442,28 @@ function AccuracyScreen() {
   const [outcomeFilter, setOutcomeFilter] = useState('ALL');
   const [checking, setChecking] = useState(false);
   const [msg, setMsg] = useState(null);
+  const [lastCheckAt, setLastCheckAt] = useState(null);
 
   const reload = useCallback(() => setTrades(getAllTrades()), []);
   useEffect(reload, [reload]);
+
+  // Auto-refresh trades list when the global background checker resolves any
+  useEffect(() => {
+    const handler = (e) => {
+      reload();
+      const n = e.detail?.length || 0;
+      if (n) setMsg(`✅ Auto-resolved ${n} trade${n > 1 ? 's' : ''}: ${e.detail.map(r => `${r.pair} ${r.outcome}`).join(' · ')}`);
+      setTimeout(() => setMsg(null), 6000);
+    };
+    window.addEventListener('tredways:trades-resolved', handler);
+    return () => window.removeEventListener('tredways:trades-resolved', handler);
+  }, [reload]);
+
+  // Also poll the trades list every 15 s so newly-logged trades appear promptly
+  useEffect(() => {
+    const id = setInterval(reload, 15000);
+    return () => clearInterval(id);
+  }, [reload]);
 
   const stats = useMemo(() => computeStats(trades, strategyFilter), [trades, strategyFilter]);
 
@@ -437,29 +479,17 @@ function AccuracyScreen() {
   const checkOutcomes = async () => {
     setChecking(true);
     try {
-      const resolved = await checkOpenTradesLive(async (p) => {
-        try {
-          const clean = p.toUpperCase().replace(/[-/_]/g, '');
-          const isCrypto = /BTC|ETH|SOL|XRP|DOGE|BNB/.test(clean);
-          const isGold = /GOLD|XAU/.test(clean);
-          let yf;
-          if (isGold) yf = 'GC=F';
-          else if (isCrypto) yf = clean.replace('USD', '') + '-USD';
-          else if (clean.length === 6) yf = clean + '=X';
-          else yf = clean + '.NS';
-          const url = `https://query1.finance.yahoo.com/v8/finance/chart/${yf}?interval=1m&range=1d`;
-          const r = await fetch(url);
-          const j = await r.json();
-          return j?.chart?.result?.[0]?.meta?.regularMarketPrice ?? null;
-        } catch { return null; }
-      });
+      const resolved = await checkOpenTradesViaBackend(checkTrades);
       reload();
+      setLastCheckAt(new Date());
       setMsg(resolved.length
-        ? resolved.map(r => `${r.pair}: ${r.outcome} @ ${fmt(r.closePrice)}`).join(' · ')
-        : 'No open trades hit their TP or SL yet.');
+        ? `Resolved ${resolved.length}: ${resolved.map(r => `${r.pair} ${r.outcome} @ ${fmt(r.closePrice)}`).join(' · ')}`
+        : 'No open trades hit their TP or SL yet — the app keeps watching in the background every 45s.');
+    } catch (e) {
+      setMsg('Check failed: ' + (e.response?.data?.detail || e.message));
     } finally {
       setChecking(false);
-      setTimeout(() => setMsg(null), 5000);
+      setTimeout(() => setMsg(null), 8000);
     }
   };
 
@@ -475,9 +505,10 @@ function AccuracyScreen() {
           <div>
             <div className="card-title" style={{ marginBottom: 4 }}>Accuracy Tracker</div>
             <div className="small">
-              🤖 <b style={{ color: 'var(--accent)' }}>Auto-logging is ACTIVE.</b> Every BUY / SELL signal from the analyze
-              engine (Stocks + Forex) and the SMC chart engine is logged here automatically so you can
-              measure the app&apos;s accuracy and profit (in R multiples). Duplicate setups are deduped.
+              🤖 <b style={{ color: 'var(--accent)' }}>Auto-checking every 45s in the background.</b>{' '}
+              The engine walks candle history since each trade opened, so TP / SL hits are detected
+              even if the price later returned to entry. Duplicate setups are deduped.
+              {lastCheckAt && <span style={{ marginLeft: 8, opacity: 0.7 }}>Last check: {lastCheckAt.toLocaleTimeString()}</span>}
             </div>
           </div>
           <button className="btn ghost" onClick={clearAll} data-testid="clear-history-btn">🗑 Clear</button>

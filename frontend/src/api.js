@@ -31,3 +31,7 @@ export const getHealth  = () => api.get('/health').then(r => r.data);
 // ── Opportunity Ticker ─────────────────────────────────────
 export const getOpportunities = (minGrade = 'B') =>
   api.get(`/opportunities?min_grade=${encodeURIComponent(minGrade)}`, { timeout: 120000 }).then(r => r.data);
+
+// ── Trade outcome checker (walks candle history since entry) ──
+export const checkTrades = (trades) =>
+  api.post('/check-trades', { trades }, { timeout: 60000 }).then(r => r.data);
