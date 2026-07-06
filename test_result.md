@@ -10,46 +10,54 @@
 ---
 
 ## user_problem_statement
-"SEE ACCURACY TRACKER TAKES ONLY TRADE BUT ITS NOT HIT TARGET NOR STOP LOSS WIN RATE 0 ITS NOT CHECKING APP PERFORMANCE. NOT SHOW APP ACCURACY ITS SHOULD CHECK AUTOMATICALLY" — screenshot shows 10 open trades, 0 wins/losses, 0% win rate. User wants the tracker to automatically check TP/SL hits in the background.
+"why our candle long open close in gold only, clear button not working, any reason" — two bugs reported with screenshots: (1) GOLD 5m chart shows tall vertical bars in the middle (phantom / outlier candles that look like solid vertical stripes because of huge range compared to normal), and TradingView XAUUSD 5m shows a clean chart. (2) Clear button in the Accuracy Tracker doesn't work; screenshot shows the button squished vertically with distorted text.
 
-## Bug Fix + Enhancement — Accuracy Tracker auto-check
-**Backend files:** `/app/backend/server.py`
-**Frontend files:** `/app/frontend/src/api.js`, `/app/frontend/src/tradeHistory.js`, `/app/frontend/src/App.js`
+## Bug Fix Applied
+**Files:** `/app/frontend/src/SMCChart.js`, `/app/frontend/src/App.js`, `/app/frontend/src/index.css`
 
-**Root causes:**
-1. Outcome check was manual-only (required clicking "Auto-check Open Trades" button every time).
-2. The old check compared TP/SL only against the CURRENT live price — completely missing TP or SL touches that had already happened (if price bounced back to entry, the trade stayed OPEN forever).
-3. Live-price fetch was from browser to Yahoo (CORS-fragile).
+**Bug #1 — GOLD chart artifact candles:**
+- `refetchChart` was completely WIPING our carefully-updated live-appended candles every 20-60s and replacing them with Yahoo's response. Combined with Yahoo GC=F futures having occasional huge weekend-rollover/thin-liquidity candles, this produced flicker + phantom tall vertical bars.
+- FIX 1: Merge Yahoo's refetch response with any live-appended candles whose time > Yahoo's last candle time (preserve live tail). De-dup by time.
+- FIX 2: Added `clipOutlierCandles()` helper that clips any candle whose range is > 8× the median range of the previous 60 candles (safeguard against phantom Yahoo GC=F rollover bars). Applied on both initial load AND refetch.
 
-**Fixes:**
-1. New backend endpoint `POST /api/check-trades` — takes a batch of open trades and, for each, fetches candle history since the trade's `created_at` and walks bar-by-bar checking if the high touched TP1 or the low touched SL (LONG); mirror for SHORT. Returns WIN / LOSS / OPEN + the close price and closed_at timestamp. Uses appropriate interval (1m up to 5d age, 5m up to 25d, 15m up to 55d, 1h beyond).
-2. New frontend helper `checkOpenTradesViaBackend(checkTrades)` that posts open trades and applies resolutions to localStorage.
-3. **Global background auto-checker in App.js** runs every 45 s regardless of active tab AND on window focus. Emits `tredways:trades-resolved` CustomEvent for any UI listener.
-4. `AccuracyScreen` now listens to that event, refreshes the trade list every 15 s, shows "Last check: HH:MM:SS", and the "Auto-check Open Trades" button becomes a manual force-refresh.
+**Bug #2 — Clear button:**
+- `window.confirm()` was unreliable / silently dismissed inside mobile / iframe / webview contexts.
+- Parent flex layout squished the button into an unreadable vertical strip.
+- FIX: Replaced `window.confirm()` with a custom in-app confirmation modal (`.clear-modal-backdrop` + `.clear-modal`). New `.btn.danger` variant (red, min-width 100px, `flex-shrink: 0`, `white-space: nowrap`). Button now shows the count of trades to delete: e.g., "🗑 Clear (10)". Disabled state when empty. Modal has Cancel / Delete-all buttons with focus and click-outside-to-cancel.
 
-## Test Instructions for deep_testing_backend_v2
-- `POST /api/check-trades` with a body like:
-  ```json
-  {"trades":[
-    {"id":"t1","pair":"BTCUSD","signal_type":"LONG","entry":58000,"sl":57500,"tp1":59000,"created_at":"2026-06-30T00:00:00Z"},
-    {"id":"t2","pair":"RELIANCE","signal_type":"LONG","entry":1500,"sl":1480,"tp1":1520,"created_at":"2026-06-29T00:00:00Z"},
-    {"id":"t3","pair":"GOLD","signal_type":"SHORT","entry":4200,"sl":4230,"tp1":4160,"created_at":"2026-06-30T00:00:00Z"},
-    {"id":"t4","pair":"EURUSD","signal_type":"LONG","entry":1.1000,"sl":1.0950,"tp1":1.1100,"created_at":"2026-06-30T00:00:00Z"}
-  ]}
-  ```
-  Expected: HTTP 200 with `{checked, resolved, results: [{id, outcome ∈ WIN|LOSS|OPEN, close_price, closed_at}]}`. At least one should resolve (BTC has moved enough).
-- Test edge cases:
-  - Empty trades list → `checked:0, resolved:0, results:[]`.
-  - Invalid pair (`"pair":"XXXNONE"`) → OPEN outcome, no error.
-  - Missing `created_at` (should default to using most recent candles) → returns without crashing.
-- Verify all other existing endpoints still work: `/api/health`, `/api/opportunities`, `/api/smc-analyze`, `/api/chart-data`, `/api/analyze`, `/api/analyze-forex`.
+## Test Instructions for auto_frontend_testing_agent
+Preview URL: https://edee4343-0206-46c8-839e-4dd0df51ee5d.preview.emergentagent.com
+
+1. **Clear button test:**
+   - Navigate to ACCURACY TRACKER tab.
+   - Verify a red "🗑 Clear (N)" button is visible in the top-right of the Accuracy Tracker card (where N is the current trade count).
+   - If N > 0: click the button. Verify a modal appears with title "Clear entire trade history?" and shows the trade count.
+   - Click "Cancel" — modal closes, trades still there.
+   - Click the button again → click "🗑 Delete all" → modal closes, trades list is now empty, message "✅ All trade history cleared." appears briefly.
+   - Reload the page — verify trade list stays empty (i.e., localStorage was actually cleared).
+   - When empty, verify the button shows "🗑 Clear" (no count) and is disabled (opacity ~0.4, cursor not-allowed).
+
+2. **GOLD chart artifact test:**
+   - Open FOREX / CRYPTO tab. Enter `GOLD` and click analyze.
+   - Switch through timeframes 1m, 5m, 15m, 1h.
+   - For each TF, verify:
+     - No candle is dramatically larger (5-10×) than its neighbours. Specifically no "tall vertical stripe" candles in the middle of the chart.
+     - Chart looks visually similar in overall shape to normal candle charts.
+   - Wait 30 seconds and observe — the chart should remain stable (no flicker of huge candles appearing then disappearing).
+
+## Pass criteria
+- Clear button reliably opens the custom modal, Cancel works, Delete all clears trades AND localStorage.
+- GOLD chart shows no dramatic outlier candles on any tested TF over a 30-second observation window.
+
+## Fail criteria
+- Clear button does not respond to clicks, OR uses window.confirm() which is silently dismissed, OR the "Delete all" doesn't actually clear localStorage.
+- GOLD chart still shows visible vertical stripe / phantom candles on any tested TF.
 
 ## Communication Log
 
 ### agent → main
-- Added `POST /api/check-trades` (walks candle history for proper TP/SL hit detection) + global 45s background auto-checker in App.js + AccuracyScreen event listener.
-- Manual verification: curl on BTC LONG with entry $58k → resolved as WIN @ $59k.
-- Ready for automated backend testing.
+- Fixed both bugs. GOLD chart: merged refetch with live-appended bars + outlier clipper (8× median range). Clear button: custom modal replacing window.confirm + red danger-style button with count.
+- Awaiting frontend testing agent verification.
 
 
 ### testing_agent → main (2025-07-01)
@@ -207,3 +215,105 @@
 - Edge cases handled gracefully (empty batch, invalid symbol, missing created_at)
 - All regression endpoints continue to work correctly
 - The new /api/check-trades endpoint is fully functional and production-ready
+
+
+### testing_agent → main (2025-07-06 - Bug Fix Verification: Clear Button + GOLD Chart Outliers)
+- ✅ **BOTH BUG FIXES VERIFIED - ALL TESTS PASS**
+
+**Bug #1 — Clear Button in ACCURACY TRACKER: ✅ PASS**
+
+**Issue Fixed:**
+- window.confirm() was silently blocked in mobile/iframe contexts
+- Button was squished into unreadable vertical strip due to flex layout
+
+**Testing Performed:**
+1. **Button Visibility & Styling**: ✅ PASS
+   - Button found with text "🗑 Clear (N)" where N = trade count
+   - Button dimensions: 100px × 34px (meets min-width 100px requirement)
+   - Button is NOT squished or distorted
+   - Red danger styling applied correctly
+   - flex-shrink: 0 and white-space: nowrap prevent squishing
+
+2. **Custom Modal (NOT window.confirm)**: ✅ PASS
+   - Clicking Clear button opens custom in-app modal
+   - Modal centered on screen with backdrop
+   - Title: "Clear entire trade history?"
+   - Body: Shows trade count and "cannot be undone" warning
+   - Two buttons: "Cancel" and "🗑 Delete all"
+   - NO browser window.confirm popup used
+
+3. **Cancel Functionality**: ✅ PASS
+   - Cancel button closes modal
+   - Trades list unchanged after Cancel
+   - Modal can be re-opened
+
+4. **Delete All Functionality**: ✅ PASS
+   - "🗑 Delete all" button closes modal
+   - Trades list becomes empty
+   - Success message displayed: "✅ All trade history cleared."
+   - localStorage actually cleared (not just UI state)
+
+5. **Persistence After Reload**: ✅ PASS
+   - Page reload → trades list still empty
+   - localStorage.clear() was executed correctly
+   - Data does not reappear
+
+6. **Disabled State When Empty**: ✅ PASS
+   - Button shows "🗑 Clear" (no count) when empty
+   - Button is disabled (opacity 0.4, cursor not-allowed)
+   - Button not clickable when disabled
+
+**Bug #2 — GOLD Chart Outlier Candles: ✅ PASS**
+
+**Issue Fixed:**
+- Yahoo GC=F futures had occasional huge weekend-rollover/thin-liquidity candles
+- refetchChart was wiping live-appended candles every 20-60s
+- Combined effect: tall vertical stripe "phantom" candles (5-10× normal height)
+
+**Fix Applied:**
+- clipOutlierCandles() helper clips candles > 8× median range
+- refetchChart now merges Yahoo response with live-appended bars (preserves live tail)
+- Deduplication by time prevents duplicates
+
+**Testing Performed:**
+Tested GOLD on all timeframes: 1m, 5m, 15m, 1h
+
+1. **1m Timeframe**: ✅ PASS
+   - All candles normal-sized and uniform
+   - No vertical stripe outliers visible
+   - Chart shows proper LONG B setup with normal candle heights
+
+2. **5m Timeframe**: ✅ PASS
+   - All candles normal-sized
+   - No tall vertical bars
+   - Extended 30-second observation: NO flicker or giant candles appearing/disappearing
+   - Chart remained stable throughout observation period
+
+3. **15m Timeframe**: ✅ PASS
+   - All candles normal-sized
+   - No outlier vertical bars
+   - Candle heights consistent with neighbors
+
+4. **1h Timeframe**: ✅ PASS
+   - All candles normal-sized
+   - No vertical stripe candles
+   - Chart shows clean accumulation phase
+
+**Visual Verification:**
+- All screenshots show clean candle charts
+- EMA 20 (amber) and EMA 50 (cyan) rendering correctly
+- Support/Resistance trendlines visible
+- Volume histogram at bottom
+- NO candles with 5-10× height of neighbors
+- NO phantom vertical stripe bars
+- Chart stable over time (no flicker)
+
+**Pass Criteria Met:**
+✅ Clear button visible with count, opens custom modal (not window.confirm)
+✅ Cancel and Delete all both work correctly
+✅ Delete all persists across reload (localStorage cleared)
+✅ Button disabled when empty
+✅ No outlier vertical stripe candles on any GOLD timeframe
+✅ Chart stable over 30s observation on 5m (no flicker)
+
+**Verdict: BOTH BUGS FIXED** — All functionality working as intended.

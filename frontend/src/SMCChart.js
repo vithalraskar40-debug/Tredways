@@ -145,12 +145,13 @@ export default function SMCChart({ pair, onSignal }) {
         ]);
         if (cancelled) return;
 
-        const candles = (chartRes.candles || [])
+        const rawCandles = (chartRes.candles || [])
           .map(c => ({
             time: Math.floor(c.timestamp / 1000),
             open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume,
           }))
           .filter(c => Number.isFinite(c.open));
+        const candles = clipOutlierCandles(rawCandles);
 
         candlesDataRef.current = candles;
         candleRef.current.setData(candles);
@@ -274,32 +275,49 @@ export default function SMCChart({ pair, onSignal }) {
       } catch { /* ignore */ }
     };
 
-    // Periodically refetch chart-data to close gaps and prevent long-term drift
+    // Periodically refetch chart-data to close gaps and prevent long-term drift.
+    // IMPORTANT: merge Yahoo's response with our live-appended bars instead of
+    // wiping them (otherwise the chart flickers & mixes fresh live prices with
+    // stale Yahoo data → produces artifact spike/doji patterns for GOLD).
     const refetchGuard = { id: null };
     const refetchChart = async () => {
       try {
         const chartRes = await getChartData(pair, timeframe);
         if (cancelled) return;
-        const candles = (chartRes.candles || [])
+        const fresh = (chartRes.candles || [])
           .map(c => ({
             time: Math.floor((c.timestamp ?? Date.parse(c.datetime)) / 1000),
             open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume,
           }))
           .filter(c => Number.isFinite(c.time) && Number.isFinite(c.open));
-        if (candles.length >= 60) {
-          candlesDataRef.current = candles;
-          candleRef.current && candleRef.current.setData(candles);
-          if (volRef.current) {
-            volRef.current.setData(candles.map(c => ({
-              time: c.time,
-              value: c.volume || 0,
-              color: c.close >= c.open ? 'rgba(34,197,94,0.35)' : 'rgba(244,63,94,0.35)',
-            })));
-          }
-          drawEMA(candles, 20, ema20Ref.current);
-          drawEMA(candles, 50, ema50Ref.current);
-          drawTrendlines(candles);
+        if (fresh.length < 60) return;
+
+        // Merge: keep any live-appended bars whose time > fresh's last time
+        const freshLastTime = fresh[fresh.length - 1].time;
+        const existing = candlesDataRef.current || [];
+        const liveTail = existing.filter(c => c.time > freshLastTime);
+        let merged = [...fresh, ...liveTail];
+
+        // Dedup by time (keep the LAST entry per time key)
+        const byTime = new Map();
+        for (const c of merged) byTime.set(c.time, c);
+        merged = Array.from(byTime.values()).sort((a, b) => a.time - b.time);
+
+        // Outlier filter (same helper used on initial load)
+        merged = clipOutlierCandles(merged);
+
+        candlesDataRef.current = merged;
+        candleRef.current && candleRef.current.setData(merged);
+        if (volRef.current) {
+          volRef.current.setData(merged.map(c => ({
+            time: c.time,
+            value: c.volume || 0,
+            color: c.close >= c.open ? 'rgba(34,197,94,0.35)' : 'rgba(244,63,94,0.35)',
+          })));
         }
+        drawEMA(merged, 20, ema20Ref.current);
+        drawEMA(merged, 50, ema50Ref.current);
+        drawTrendlines(merged);
       } catch { /* ignore */ }
     };
 
@@ -654,4 +672,28 @@ function fmtPrice(n) {
 function tfToSeconds(tf) {
   const map = { '1m': 60, '5m': 300, '15m': 900, '30m': 1800, '1h': 3600, '4h': 14400, '1d': 86400, '1w': 604800 };
   return map[tf] || 300;
+}
+
+/**
+ * Clip outlier candles (Yahoo GC=F futures weekend-rollover gaps produce
+ * $80-range phantom candles that trash the SMC engine and chart visuals).
+ * Any candle whose range is > 8× the median of the previous 60 candles is
+ * clipped down to a reasonable size around its body midpoint.
+ */
+function clipOutlierCandles(candles) {
+  if (!candles || candles.length < 30) return candles;
+  const ranges = candles.map(c => c.high - c.low).filter(r => r > 0).sort((a, b) => a - b);
+  if (ranges.length < 20) return candles;
+  const medRange = ranges[Math.floor(ranges.length / 2)];
+  const cap = medRange * 8;
+  return candles.map(c => {
+    const rng = c.high - c.low;
+    if (rng <= cap) return c;
+    const mid = (c.open + c.close) / 2;
+    return {
+      ...c,
+      high: Math.max(c.open, c.close, mid + cap / 2),
+      low:  Math.min(c.open, c.close, mid - cap / 2),
+    };
+  });
 }

@@ -443,6 +443,7 @@ function AccuracyScreen() {
   const [checking, setChecking] = useState(false);
   const [msg, setMsg] = useState(null);
   const [lastCheckAt, setLastCheckAt] = useState(null);
+  const [confirmClear, setConfirmClear] = useState(false);
 
   const reload = useCallback(() => setTrades(getAllTrades()), []);
   useEffect(reload, [reload]);
@@ -494,15 +495,45 @@ function AccuracyScreen() {
   };
 
   const setManual = (id, outcome) => { updateTradeOutcome(id, outcome); reload(); };
-  const clearAll = () => {
-    if (window.confirm('Delete entire trade history?')) { clearAllTrades(); reload(); }
+  const doClearAll = () => {
+    clearAllTrades();
+    reload();
+    setConfirmClear(false);
+    setMsg('✅ All trade history cleared.');
+    setTimeout(() => setMsg(null), 3000);
   };
 
   return (
     <div>
+      {/* Custom Clear-history confirm modal (window.confirm is unreliable on mobile / iframes) */}
+      {confirmClear && (
+        <div className="clear-modal-backdrop" onClick={() => setConfirmClear(false)}>
+          <div className="clear-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="clear-modal-title">Clear entire trade history?</div>
+            <div className="clear-modal-body">
+              This will permanently delete <b>{trades.length}</b> trade
+              {trades.length === 1 ? '' : 's'} from local storage.
+              This cannot be undone.
+            </div>
+            <div className="clear-modal-actions">
+              <button
+                className="btn ghost"
+                onClick={() => setConfirmClear(false)}
+                data-testid="clear-cancel-btn"
+              >Cancel</button>
+              <button
+                className="btn danger"
+                onClick={doClearAll}
+                data-testid="clear-confirm-btn"
+              >🗑 Delete all</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="card">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
-          <div>
+        <div className="accuracy-head">
+          <div className="accuracy-head-text">
             <div className="card-title" style={{ marginBottom: 4 }}>Accuracy Tracker</div>
             <div className="small">
               🤖 <b style={{ color: 'var(--accent)' }}>Auto-checking every 45s in the background.</b>{' '}
@@ -511,7 +542,13 @@ function AccuracyScreen() {
               {lastCheckAt && <span style={{ marginLeft: 8, opacity: 0.7 }}>Last check: {lastCheckAt.toLocaleTimeString()}</span>}
             </div>
           </div>
-          <button className="btn ghost" onClick={clearAll} data-testid="clear-history-btn">🗑 Clear</button>
+          <button
+            className="btn danger"
+            onClick={() => setConfirmClear(true)}
+            data-testid="clear-history-btn"
+            disabled={trades.length === 0}
+            title={trades.length ? `Clear ${trades.length} trades` : 'No trades to clear'}
+          >🗑 Clear{trades.length ? ` (${trades.length})` : ''}</button>
         </div>
       </div>
 
