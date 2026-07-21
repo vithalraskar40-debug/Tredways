@@ -41,6 +41,15 @@ export default function SMCChart({ pair, onSignal }) {
   const [liveSource, setLiveSource] = useState('');
   const [error, setError] = useState(null);
   const [fullscreen, setFullscreen] = useState(false);
+  const [activeDef, setActiveDef] = useState(null);  // which legend definition popover is shown
+
+  // Close popover on outside click / escape
+  useEffect(() => {
+    if (!activeDef) return;
+    const onKey = (e) => { if (e.key === 'Escape') setActiveDef(null); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [activeDef]);
 
   // ── Create chart once ────────────────────────────────────────
   useEffect(() => {
@@ -647,17 +656,135 @@ export default function SMCChart({ pair, onSignal }) {
       {error && <div className="reason-row" style={{ color: '#f87171' }}>{error}</div>}
 
       <div className="phase-legend">
-        <span className="phase-pill acc"><span className="sw" style={{ background: '#22c55e' }} /> Accumulation</span>
-        <span className="phase-pill man"><span className="sw" style={{ background: '#60a5fa' }} /> Manipulation</span>
-        <span className="phase-pill dis"><span className="sw" style={{ background: '#f43f5e' }} /> Distribution</span>
-        <span className="phase-pill ob"><span className="sw" style={{ background: '#ffb020' }} /> EMA 20</span>
-        <span className="phase-pill fvg"><span className="sw" style={{ background: '#22d3ee' }} /> EMA 50</span>
-        <span className="phase-pill acc"><span className="sw" style={{ background: 'rgba(34,197,94,0.85)', height: 2 }} /> Support TL</span>
-        <span className="phase-pill dis"><span className="sw" style={{ background: 'rgba(244,63,94,0.85)', height: 2 }} /> Resistance TL</span>
+        {LEGEND_ITEMS.map((it) => (
+          <button
+            key={it.key}
+            type="button"
+            className={`phase-pill ${it.cls} ${activeDef === it.key ? 'active' : ''}`}
+            onClick={(e) => { e.stopPropagation(); setActiveDef(a => a === it.key ? null : it.key); }}
+            data-testid={`legend-${it.key}`}
+            title="Tap for definition"
+          >
+            <span className="sw" style={it.swatchStyle} /> {it.label}
+            <span className="info-i">ⓘ</span>
+          </button>
+        ))}
       </div>
+
+      {activeDef && (
+        <div className="def-backdrop" onClick={() => setActiveDef(null)}>
+          <div
+            className={`def-popover ${LEGEND_DEFS[activeDef].tone}`}
+            onClick={(e) => e.stopPropagation()}
+            data-testid={`def-popover-${activeDef}`}
+          >
+            <div className="def-head">
+              <span className="def-icon">{LEGEND_DEFS[activeDef].emoji}</span>
+              <span className="def-title">{LEGEND_DEFS[activeDef].title}</span>
+              <button className="def-close" onClick={() => setActiveDef(null)} aria-label="Close">×</button>
+            </div>
+            <div className="def-body">
+              <p className="def-lead">{LEGEND_DEFS[activeDef].summary}</p>
+              <ul className="def-list">
+                {LEGEND_DEFS[activeDef].points.map((p, i) => <li key={i}>{p}</li>)}
+              </ul>
+              {LEGEND_DEFS[activeDef].howToTrade && (
+                <div className="def-trade">
+                  <b>How the app uses it:</b> {LEGEND_DEFS[activeDef].howToTrade}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
+
+// ── SMC glossary — shown in a popover when user clicks a legend pill ──
+const LEGEND_ITEMS = [
+  { key: 'acc',  cls: 'acc', label: 'Accumulation',  swatchStyle: { background: '#22c55e' } },
+  { key: 'man',  cls: 'man', label: 'Manipulation',  swatchStyle: { background: '#60a5fa' } },
+  { key: 'dis',  cls: 'dis', label: 'Distribution',  swatchStyle: { background: '#f43f5e' } },
+  { key: 'ema20',cls: 'ob',  label: 'EMA 20',        swatchStyle: { background: '#ffb020' } },
+  { key: 'ema50',cls: 'fvg', label: 'EMA 50',        swatchStyle: { background: '#22d3ee' } },
+  { key: 'supp', cls: 'acc', label: 'Support TL',    swatchStyle: { background: 'rgba(34,197,94,0.85)', height: 2 } },
+  { key: 'res',  cls: 'dis', label: 'Resistance TL', swatchStyle: { background: 'rgba(244,63,94,0.85)', height: 2 } },
+];
+
+const LEGEND_DEFS = {
+  acc: {
+    tone: 'good', emoji: '🟢', title: 'Accumulation',
+    summary: 'Smart-money is quietly BUYING inside a tight sideways range at the bottom of a move. Retail sees "boring" price — big players see a discount.',
+    points: [
+      'Price consolidates in a range after a downtrend.',
+      'Volume clusters at the lows (absorption of sell orders).',
+      'Multiple false breakdowns below range — liquidity grabs.',
+      'Ends with a Break of Structure (BOS) to the UPSIDE.',
+    ],
+    howToTrade: 'The app looks for a bullish liquidity grab below the accumulation low + BOS above the range high → LONG signal.',
+  },
+  man: {
+    tone: 'info', emoji: '🔵', title: 'Manipulation (Liquidity Grab)',
+    summary: 'A deliberate short-lived spike beyond a swing level to trigger retail stop-losses / breakout orders, then reversal in the opposite direction.',
+    points: [
+      'Price briefly spikes above the highs (stop-hunt) or below the lows.',
+      'Reverses quickly — usually within 1–3 candles.',
+      'Traps late breakout traders on the wrong side.',
+      'This is where smart-money fills orders using retail liquidity.',
+    ],
+    howToTrade: 'Manipulation = the app\'s primary entry trigger. Grab-and-reverse candle → the app draws entry, SL beyond the wick, and TP toward the opposite range boundary.',
+  },
+  dis: {
+    tone: 'bad', emoji: '🔴', title: 'Distribution',
+    summary: 'Smart-money is quietly SELLING inside a tight sideways range at the top of a move. Retail buys the "breakout" — big players sell into it.',
+    points: [
+      'Price consolidates in a range after an uptrend.',
+      'Multiple false breakouts above range highs — buy-side liquidity swept.',
+      'Volume divergence: rising price + falling buy-volume.',
+      'Ends with a Break of Structure (BOS) to the DOWNSIDE.',
+    ],
+    howToTrade: 'The app looks for a bearish liquidity grab above the distribution high + BOS below the range low → SHORT signal.',
+  },
+  ema20: {
+    tone: 'accent', emoji: '📈', title: 'EMA 20 (short-term trend)',
+    summary: 'The 20-period Exponential Moving Average — a fast-reacting line that shows short-term price momentum.',
+    points: [
+      'Price above EMA 20 = short-term bullish momentum.',
+      'Price below EMA 20 = short-term bearish momentum.',
+      'EMA 20 crossing above EMA 50 = bullish crossover ("golden cross" style).',
+      'The app uses EMA slope for phase confirmation.',
+    ],
+  },
+  ema50: {
+    tone: 'accent2', emoji: '📉', title: 'EMA 50 (medium-term trend)',
+    summary: 'The 50-period Exponential Moving Average — a slower line that captures the medium-term trend direction.',
+    points: [
+      'EMA 50 acts as dynamic support/resistance during trends.',
+      'Price above EMA 50 = medium-term uptrend.',
+      'Price below EMA 50 = medium-term downtrend.',
+      'Combined with EMA 20 to gauge trend strength.',
+    ],
+  },
+  supp: {
+    tone: 'good', emoji: '🟢', title: 'Support Trendline (auto)',
+    summary: 'Auto-drawn diagonal line connecting recent swing lows. Bullish structure — buyers step in at progressively higher prices.',
+    points: [
+      'A break BELOW this line = potential trend reversal or deeper correction.',
+      'Bounces from this line = high-probability LONG entries.',
+      'Steeper slope = stronger uptrend but also more fragile.',
+    ],
+  },
+  res: {
+    tone: 'bad', emoji: '🔴', title: 'Resistance Trendline (auto)',
+    summary: 'Auto-drawn diagonal line connecting recent swing highs. Bearish structure — sellers step in at progressively lower prices.',
+    points: [
+      'A break ABOVE this line = potential trend reversal or bullish breakout.',
+      'Rejections from this line = high-probability SHORT entries.',
+      'Convergence with support = symmetrical triangle / breakout setup.',
+    ],
+  },
+};
 
 function fmtPrice(n) {
   if (n == null || !Number.isFinite(+n)) return '—';

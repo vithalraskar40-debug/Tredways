@@ -10,53 +10,48 @@
 ---
 
 ## user_problem_statement
-"why our candle long open close in gold only, clear button not working, any reason" — two bugs reported with screenshots: (1) GOLD 5m chart shows tall vertical bars in the middle (phantom / outlier candles that look like solid vertical stripes because of huge range compared to normal), and TradingView XAUUSD 5m shows a clean chart. (2) Clear button in the Accuracy Tracker doesn't work; screenshot shows the button squished vertically with distorted text.
+"when i click any one like accumulation or manipulation or distribution then show definition as tooltip what is accumulation or manipulation or distribution" — user wants clickable legend pills that reveal an SMC glossary popover explaining each concept.
 
-## Bug Fix Applied
-**Files:** `/app/frontend/src/SMCChart.js`, `/app/frontend/src/App.js`, `/app/frontend/src/index.css`
+## Feature Added — Clickable SMC Legend Definitions
+**Files:** `/app/frontend/src/SMCChart.js`, `/app/frontend/src/index.css`
 
-**Bug #1 — GOLD chart artifact candles:**
-- `refetchChart` was completely WIPING our carefully-updated live-appended candles every 20-60s and replacing them with Yahoo's response. Combined with Yahoo GC=F futures having occasional huge weekend-rollover/thin-liquidity candles, this produced flicker + phantom tall vertical bars.
-- FIX 1: Merge Yahoo's refetch response with any live-appended candles whose time > Yahoo's last candle time (preserve live tail). De-dup by time.
-- FIX 2: Added `clipOutlierCandles()` helper that clips any candle whose range is > 8× the median range of the previous 60 candles (safeguard against phantom Yahoo GC=F rollover bars). Applied on both initial load AND refetch.
-
-**Bug #2 — Clear button:**
-- `window.confirm()` was unreliable / silently dismissed inside mobile / iframe / webview contexts.
-- Parent flex layout squished the button into an unreadable vertical strip.
-- FIX: Replaced `window.confirm()` with a custom in-app confirmation modal (`.clear-modal-backdrop` + `.clear-modal`). New `.btn.danger` variant (red, min-width 100px, `flex-shrink: 0`, `white-space: nowrap`). Button now shows the count of trades to delete: e.g., "🗑 Clear (10)". Disabled state when empty. Modal has Cancel / Delete-all buttons with focus and click-outside-to-cancel.
+**What changed:**
+1. Converted the 7 legend `<span>` pills into interactive `<button>` elements with an ⓘ info glyph and hover glow.
+2. Clicking a pill opens a **centered modal popover** with:
+   - Colored top border matching the pill (green / red / blue / amber / cyan).
+   - Emoji + Title (e.g. 🟢 Accumulation).
+   - One-line summary (plain English).
+   - Bullet-list of key characteristics.
+   - "How the app uses it" callout in the accent-amber box (only for Accumulation / Manipulation / Distribution).
+3. Popover closes on: click backdrop, click × button, or Escape key.
+4. Added glossary entries for Accumulation, Manipulation, Distribution, EMA 20, EMA 50, Support TL, Resistance TL.
 
 ## Test Instructions for auto_frontend_testing_agent
 Preview URL: https://edee4343-0206-46c8-839e-4dd0df51ee5d.preview.emergentagent.com
 
-1. **Clear button test:**
-   - Navigate to ACCURACY TRACKER tab.
-   - Verify a red "🗑 Clear (N)" button is visible in the top-right of the Accuracy Tracker card (where N is the current trade count).
-   - If N > 0: click the button. Verify a modal appears with title "Clear entire trade history?" and shows the trade count.
-   - Click "Cancel" — modal closes, trades still there.
-   - Click the button again → click "🗑 Delete all" → modal closes, trades list is now empty, message "✅ All trade history cleared." appears briefly.
-   - Reload the page — verify trade list stays empty (i.e., localStorage was actually cleared).
-   - When empty, verify the button shows "🗑 Clear" (no count) and is disabled (opacity ~0.4, cursor not-allowed).
+1. Open the preview URL, click **FOREX / CRYPTO** tab.
+2. Enter `GOLD` and analyze so the SMCChart renders.
+3. Scroll to the legend row at the bottom of the chart (pills labeled Accumulation, Manipulation, Distribution, EMA 20, EMA 50, Support TL, Resistance TL).
+4. Verify each pill now has a small ⓘ icon after the label.
+5. Click the "Accumulation" pill:
+   - A centered modal popover appears with title "🟢 Accumulation".
+   - It shows a summary paragraph, a bulleted list, and an amber "How the app uses it" callout.
+6. Click outside the popover (on the backdrop) — popover closes.
+7. Click "Manipulation" pill — verify popover title "🔵 Manipulation (Liquidity Grab)".
+8. Press ESC key — popover closes.
+9. Click "Distribution" pill — verify "🔴 Distribution" popover appears with 4 bullets.
+10. Click the × close button in the popover header — popover closes.
+11. Click "EMA 20" pill — verify "📈 EMA 20 (short-term trend)" popover.
+12. Click "Support TL" and "Resistance TL" pills — verify each opens its own popover.
 
-2. **GOLD chart artifact test:**
-   - Open FOREX / CRYPTO tab. Enter `GOLD` and click analyze.
-   - Switch through timeframes 1m, 5m, 15m, 1h.
-   - For each TF, verify:
-     - No candle is dramatically larger (5-10×) than its neighbours. Specifically no "tall vertical stripe" candles in the middle of the chart.
-     - Chart looks visually similar in overall shape to normal candle charts.
-   - Wait 30 seconds and observe — the chart should remain stable (no flicker of huge candles appearing then disappearing).
+**Pass criteria:** Every pill opens its correct popover with the expected title/summary/bullets. Popover closes via backdrop, × button, and Escape key. No console errors.
 
-## Pass criteria
-- Clear button reliably opens the custom modal, Cancel works, Delete all clears trades AND localStorage.
-- GOLD chart shows no dramatic outlier candles on any tested TF over a 30-second observation window.
-
-## Fail criteria
-- Clear button does not respond to clicks, OR uses window.confirm() which is silently dismissed, OR the "Delete all" doesn't actually clear localStorage.
-- GOLD chart still shows visible vertical stripe / phantom candles on any tested TF.
+**Fail criteria:** Any pill doesn't open a popover, popover shows wrong content, or popover can't be closed.
 
 ## Communication Log
 
 ### agent → main
-- Fixed both bugs. GOLD chart: merged refetch with live-appended bars + outlier clipper (8× median range). Clear button: custom modal replacing window.confirm + red danger-style button with count.
+- Added clickable legend pills that open a definition popover with SMC glossary content.
 - Awaiting frontend testing agent verification.
 
 
